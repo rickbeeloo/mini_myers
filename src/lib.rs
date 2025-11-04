@@ -2,6 +2,7 @@
 use core::simd::Simd;
 use std::simd::cmp::{SimdOrd, SimdPartialEq, SimdPartialOrd};
 use std::simd::{LaneCount, SupportedLaneCount};
+use std::time::Instant;
 
 #[derive(Debug, Clone)]
 pub struct TQueries {
@@ -213,27 +214,29 @@ where
             let ph_shift = ph << 1;
             let new_pv = (mh << 1) | !(xv | ph_shift);
             let new_mv = ph_shift & xv;
+
             unsafe {
                 *pv_vec.get_unchecked_mut(v) = new_pv;
-            }
-            mv_vec[v] = new_mv;
-            scores_vec[v] = new_score;
-            unsafe {
+                *mv_vec.get_unchecked_mut(v) = new_mv;
+                *scores_vec.get_unchecked_mut(v) = new_score;
                 *min_scores_vec.get_unchecked_mut(v) =
                     min_scores_vec.get_unchecked(v).simd_min(new_score);
             }
         }
     }
-    let neg1_v = Simd::<i32, LANES>::splat(-1);
     let k_v = Simd::<i32, LANES>::splat(k as i32);
-    let mut result = vec![-1i32; nq]; // -1 for "too high"
+    let neg1_v = Simd::<i32, LANES>::splat(-1);
+    let mut result = vec![-1i32; nq];
+
     for v in 0..vectors_in_block {
-        let clamped = unsafe { min_scores_vec.get_unchecked(v).simd_max(zero_v) };
-        let selected = clamped.simd_le(k_v).select(clamped, neg1_v);
+        let min_score = unsafe { *min_scores_vec.get_unchecked(v) };
+        // we check for leq k, all positions got init to max edits as t.len() + m, which then become -1 here
+        let selected = min_score.simd_le(k_v).select(min_score, neg1_v);
         let base = v * LANES;
         let end = (base + LANES).min(nq);
         result[base..end].copy_from_slice(&selected.to_array()[..end - base]);
     }
+    //println!("Time taken: {:?}", end_time.duration_since(start_time));
     result
 }
 
