@@ -266,6 +266,9 @@ where
     for t_idx in 0..target_len {
         let tb = unsafe { target.get_unchecked(t_idx) };
         let encoded = get_encoded(*tb);
+        // todo: not great to have the branch in the hot loop here, maybe we have to
+        // "assume" the user validated the input, or provide a seperate function
+        // for that,
         if encoded == INVALID_IUPAC {
             panic!("Target contains invalid IUPAC character: {:?}", *tb as char);
         }
@@ -320,8 +323,10 @@ fn get_encoded(c: u8) -> u8 {
 }
 
 // Based on sassy: https://github.com/RagnarGrootKoerkamp/sassy/blob/master/src/profiles/iupac.rs#L258
+// todo: add some tests for this table
 #[rustfmt::skip]
 const IUPAC_CODE: [u8; 32] = {
+    // Every char *not* being in the table will be set to invalid IUPAC (255 u8 value)
     let mut t = [INVALID_IUPAC; 32];
     const A: u8 = 1 << 0;
     const C: u8 = 1 << 1;

@@ -42,8 +42,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut results = Vec::new();
 
     let target_lens = vec![100000];
-    let query_lens = vec![24, 32];
-    let ks = vec![4];
+    let query_lens = vec![15, 24, 32];
+    let ks = vec![3];
     let iterations = 100;
     let n_queries = 32;
 
