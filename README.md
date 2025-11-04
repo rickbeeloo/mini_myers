@@ -2,6 +2,8 @@
 Simple SIMD Myers implementation to "check" whether short patterns (<=32nt) are present in a longer 
 text with at most `k` edits. 
 
+---
+
 ### When to use
 - Short queries (`<=32`)
 - Search for multiple of `8` queries
@@ -10,11 +12,14 @@ text with at most `k` edits.
 
 **Most likely you want something like [sassy](https://github.com/RagnarGrootKoerkamp/sassy/)**, this is a faster prefilter to run before sassy but does not return the positions, nor works for longer queries.
 
+--- 
 
 #### What it does
 We compare each character of the queries against a single text character at the time using SIMD.
 Then we track the lowest cost 
 we see along the entire text and report the cost when below the cut-off `k`, or `-1` if above `k`. 
+
+--- 
 
 #### How to use:
 ```rust
@@ -27,6 +32,7 @@ let result = mini_search(&transposed, target, 4);
 println!("Result: {:?}", result); 
 // [0,1] (ATG = 0 edits, TTG = 1 edit)
 ```
+---
 
 #### Benchmark
 Searching for 32 queries of length 24 in a 100K DNA string:
