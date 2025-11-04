@@ -35,6 +35,9 @@ println!("Result: {:?}", result);
 ---
 
 #### Benchmark
+Note that `mini_myers` and `sassy` are not directly comparable. 
+While `mini_myers` just tells us if something is present below `k`, `sassy` 
+will provide the positions, tracebacks, and cigars etc. 
 
 | Profile | Query Len | µs/query (mini_myers) | µs/query (sassy) |
 |---------|-----------|-----------------------|------------------|
