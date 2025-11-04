@@ -136,7 +136,7 @@ fn run_bench_round(
 }
 
 fn generate_random_dna(rng: &mut StdRng, len: usize) -> Vec<u8> {
-    let bases = [b'A', b'T', b'G', b'C', b'N', b'R'];
+    let bases = [b'A', b'T', b'G', b'C'];
     let mut dna = Vec::with_capacity(len);
     for _ in 0..len {
         let idx = rng.gen_range(0..bases.len());

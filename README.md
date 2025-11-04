@@ -35,25 +35,15 @@ println!("Result: {:?}", result);
 ---
 
 #### Benchmark
-Searching for 32 queries of length 24 in a 100K DNA string:
-```bash
-IUPAC, note a lot goes intro tracing for Sassy for |q|=24;k=4
-target=100000  query=24 k=4 | 
-mini_myers:   0.7652 ms/batch ( 23.9111 µs/query) 
-sassy:  41.2407 ms/batch (1288.7725 µs/query)
-target=100000  query=32 k=4 | 
-mini_myers:   0.7681 ms/batch ( 24.0024 µs/query)
-sassy:   4.1853 ms/batch (130.7896 µs/query)
 
+| Profile | Query Len | µs/query (mini_myers) | µs/query (sassy) |
+|---------|-----------|-----------------------|------------------|
+| IUPAC   |   24      | 23.5                  | 50.7             |
+| IUPAC   |   32      | 23.9                  | 51.3             |
+| DNA     |   24      | 23.2                  | 52.2             |
+| DNA     |   32      | 23.1                  | 50.4             |
 
-DNA
-target=100000  query=24 k=4 
-mini_myers:   0.7414 ms/batch ( 23.1689 µs/query)
-sassy:   1.6700 ms/batch ( 52.1862 µs/query)
+_Searching for 32 queries in a 100K DNA string with k=4._
 
-target=100000  query=32 k=4
-mini_myers:   0.7387 ms/batch ( 23.0834 µs/query)
-sassy:   1.6135 ms/batch ( 50.4230 µs/query)
-```
 
 
