@@ -8,13 +8,13 @@ text with at most `k` edits.
 - Don't need positions
 - Only have DNA chars (no IUPAC)
 
-Most likely you want something like [sassy](https://github.com/RagnarGrootKoerkamp/sassy/), this is faster prefilter to run before sassy.
+**Most likely you want something like [sassy](https://github.com/RagnarGrootKoerkamp/sassy/)**, this is faster prefilter to run before sassy but does not return the positions, nor works for longer queries.
 
 
 #### What it does
 We compare each character of the queries against a single text character at the time using SIMD.
 Then we track the lowest cost 
-we observe along the entire text and report the cost when below the cut-off `k`, or `-1` if above `k`. 
+we see along the entire text and report the cost when below the cut-off `k`, or `-1` if above `k`. 
 
 #### How to use:
 ```rust

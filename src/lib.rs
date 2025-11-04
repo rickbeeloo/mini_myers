@@ -1,21 +1,102 @@
+//! # mini_myers
+//!
+//! SIMD implementation of the Myers bitvector algorithm specifically to find test
+//! whether short queries (<=32 nucleotides) are present in a longer DNA sequence with at most `k` edits.
+//!
+//! ## Features
+//!
+//! - **SIMD-accelerated**: Uses portable SIMD for parallel processing of multiple queries, number of lanes depends on the length of the queries.
+//! - **Batch processing**: Process up to 32 queries simultaneously
+//!
+//! ## When to use
+//!
+//! - Short queries (≤32 nucleotides)
+//! - Multiple queries to search (best performance with multiples of 8)
+//! - Only need edit distance, not positions
+//! - Standard DNA characters only (A, C, G, T) - no IUPAC ambiguity codes
+//!
+//! ## Example
+//!
+//! ```rust
+//! use mini_myers::{TQueries, mini_search};
+//!
+//! // Prepare queries
+//! let queries = vec![b"ATG".to_vec(), b"TTG".to_vec()];
+//! let transposed = TQueries::new(&queries);
+//!
+//! // Search in target sequence
+//! let target = b"CCCTCGCCCCCCATGCCCCC";
+//! let result = mini_search(&transposed, target, 4);
+//!
+//! // Result: [0, 1] means ATG has 0 edits, TTG has 1 edit
+//! assert_eq!(result, vec![0, 1]);
+//! ```
+//!
+//! ## Performance
+//!
+//! For 32 queries of length 24 in a 100K DNA string with k=4:
+//! - mini_myers: ~23 µs/query
+//! - See benchmarks for detailed comparisons
+
 #![feature(portable_simd)]
 use core::simd::Simd;
 use std::simd::cmp::{SimdOrd, SimdPartialEq, SimdPartialOrd};
 use std::simd::{LaneCount, SupportedLaneCount};
-use std::time::Instant;
 
+/// Transposed query representation for efficient SIMD batch processing.
+///
+/// This structure stores queries in a transposed format where each position across all queries
+/// is stored in a SIMD vector, enabling parallel processing of multiple queries simultaneously.
+/// It also precomputes the `peq` (position-equivalent) bitvectors for each nucleotide type.
+///
+/// # Examples
+///
+/// ```rust
+/// use mini_myers::TQueries;
+///
+/// let queries = vec![b"ATG".to_vec(), b"TTG".to_vec()];
+/// let transposed = TQueries::new(&queries);
+/// assert_eq!(transposed.n_queries, 2);
+/// assert_eq!(transposed.query_length, 3);
+/// ```
 #[derive(Debug, Clone)]
 pub struct TQueries {
+    /// SIMD vectors representing transposed queries, one vector per position
     pub vectors: Vec<Simd<u8, 32>>,
+    /// Length of each query (all queries must have the same length)
     pub query_length: usize,
+    /// Number of queries (must be ≤32)
     pub n_queries: usize,
+    /// Precomputed peq bitvector for nucleotide 'A'
     pub peq_a: Vec<u32>,
+    /// Precomputed peq bitvector for nucleotide 'C'
     pub peq_c: Vec<u32>,
+    /// Precomputed peq bitvector for nucleotide 'G'
     pub peq_g: Vec<u32>,
+    /// Precomputed peq bitvector for nucleotide 'T'
     pub peq_t: Vec<u32>,
 }
 
 impl TQueries {
+    /// Creates a new `TQueries` structure from a slice of query sequences.
+    ///
+    /// This method transposes the queries and precomputes the peq bitvectors
+    /// for the Myers algorithm. All queries must have the same length, and the number
+    /// of queries must not exceed 32 (but can be less)
+    ///
+    /// # Arguments
+    ///
+    /// * `queries` - A slice of byte vectors, where each vector represents one query sequence.
+    ///   Each query must contain only DNA nucleotides (A, C, G, T). IUPAC is not supported yet.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use mini_myers::TQueries;
+    ///
+    /// let queries = vec![b"ATG".to_vec(), b"TTG".to_vec()];
+    /// let transposed = TQueries::new(&queries);
+    /// ```
     pub fn new(queries: &[Vec<u8>]) -> Self {
         assert!(!queries.is_empty(), "No queries provided");
         let query_length = queries[0].len();
@@ -81,7 +162,42 @@ impl TQueries {
     }
 }
 
-/// Dispatcher: uses optimal lane count based on query length
+/// Searches for all queries in the target sequence using the Myers algorithm.
+/// Returning the minimum edits found for the query in the entire target, or
+/// `-1` if below the provided maximum edit distance `k`.
+///
+/// The number of used SIMD lanes depends on the length of the queries:
+/// - Queries ≤16 nucleotides: uses 16 lanes
+/// - Queries >16 nucleotides: uses 8 lanes
+///
+/// # Arguments
+///
+/// * `transposed` - A `TQueries` structure containing the preprocessed queries
+/// * `target` - The target DNA sequence to search in (as a byte slice)
+/// * `k` - Maximum edit distance threshold.
+///
+/// # Returns
+///
+/// A vector of `i32` values, one per query, containing:
+/// - The minimum edit distance found (0 to k) if a match within threshold is found
+/// - `-1` if no match within the threshold k was found
+///
+///
+///
+/// # Examples
+///
+/// ```rust
+/// use mini_myers::{TQueries, mini_search};
+///
+/// let queries = vec![b"ATG".to_vec(), b"TTG".to_vec()];
+/// let transposed = TQueries::new(&queries);
+/// let target = b"CCCTCGCCCCCCATGCCCCC";
+///
+/// // Search with k=4 (allow up to 4 edits)
+/// let result = mini_search(&transposed, target, 4);
+/// // Result: [0, 1] - ATG found with 0 edits, TTG found with 1 edit
+///
+/// ```
 #[inline(always)]
 pub fn mini_search(transposed: &TQueries, target: &[u8], k: u8) -> Vec<i32> {
     let nq = transposed.n_queries;
@@ -274,6 +390,9 @@ mod tests {
         let t = b"GTCTGA"; // 2 edits
         let result = mini_search(&transposed, t, 4);
         assert_eq!(result, vec![2]);
+        let t = b"GTTGA"; // 3 edits (1 del)
+        let result = mini_search(&transposed, t, 4);
+        assert_eq!(result, vec![3]);
         // Match should not be recovered when k == 1
         let result = mini_search(&transposed, t, 1);
         assert_eq!(result, vec![-1]);
