@@ -1,4 +1,4 @@
-### Mini Myers
+### 🤏 Mini Myers
 Simple Myers implementation to "check" whether short patterns (<=32nt) are present in a longer 
 text with at most `k` edits. 
 
@@ -31,8 +31,13 @@ println!("Result: {:?}", result);
 #### Benchmark
 Searching for 32 queries of length 24 in a 100K DNA string:
 ```bash
-target=100000  query=24 k=4 | mini_myers:   0.7414 ms/batch ( 23.1689 µs/query), sassy:   1.6700 ms/batch ( 52.1862 µs/query)
-target=100000  query=32 k=4 | mini_myers:   0.7387 ms/batch ( 23.0834 µs/query), sassy:   1.6135 ms/batch ( 50.4230 µs/query)
+target=100000  query=24 k=4 
+mini_myers:   0.7414 ms/batch ( 23.1689 µs/query)
+sassy:   1.6700 ms/batch ( 52.1862 µs/query)
+
+target=100000  query=32 k=4
+mini_myers:   0.7387 ms/batch ( 23.0834 µs/query)
+sassy:   1.6135 ms/batch ( 50.4230 µs/query)
 ```
 
 
