@@ -202,7 +202,6 @@ where
             let eq = unsafe { peq_slice.get_unchecked(v) };
             let pv = pv_vec[v];
             let mv = mv_vec[v];
-            let score = unsafe { scores_vec.get_unchecked(v) };
             let xv = eq | mv;
             let xh = (((eq & pv) + pv) ^ pv) | eq;
             let ph = mv | !(xh | pv);
@@ -210,7 +209,7 @@ where
             // Track edit distance cost
             let ph_bit = (ph & mask_vec).simd_ne(zero_v).to_int() & one_v;
             let mh_bit = (mh & mask_vec).simd_ne(zero_v).to_int() & one_v;
-            let new_score = score + (ph_bit - mh_bit);
+            let new_score = unsafe { *scores_vec.get_unchecked(v) } + (ph_bit - mh_bit);
             let ph_shift = ph << 1;
             let new_pv = (mh << 1) | !(xv | ph_shift);
             let new_mv = ph_shift & xv;
