@@ -45,8 +45,7 @@ use std::simd::{LaneCount, SupportedLaneCount};
 
 /// Transposed query representation for efficient SIMD batch processing.
 ///
-/// This structure stores queries in a transposed format where each position across all queries
-/// is stored in a SIMD vector, enabling parallel processing of multiple queries simultaneously.
+/// This structure stores queries in a transposed format.
 /// It also precomputes the `peq` (position-equivalent) bitvectors for each nucleotide type.
 ///
 /// # Examples

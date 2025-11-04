@@ -2,6 +2,14 @@
 name = "mini_myers"
 version = "0.1.0"
 edition = "2024"
+authors = ["Rick Beeloo <biobeeloo@gmail.com>"]
+license = "MIT"
+description = "SIMD myers for short queries"
+readme = "README.md"
+homepage = "https://github.com/rickbeeloo/mini_myers"
+repository = "https://github.com/rickbeeloo/mini_myers"
+keywords = ["simd", "myers", "short queries", "dna"]
+categories = ["science"]
 
 [lib]
 name = "mini_myers"
