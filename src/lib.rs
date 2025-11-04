@@ -1,6 +1,6 @@
 //! # mini_myers
 //!
-//! SIMD implementation of the Myers bitvector algorithm specifically to find test
+//! SIMD implementation of the Myers bitvector algorithm specifically to test
 //! whether short queries (<=32 nucleotides) are present in a longer DNA sequence with at most `k` edits.
 //!
 //! ## Features
