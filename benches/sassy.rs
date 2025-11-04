@@ -2,7 +2,7 @@ use mini_myers::{TQueries, mini_search};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use sassy::Searcher;
-use sassy::profiles::Dna;
+use sassy::profiles::{Dna, Iupac};
 use std::fs::{self, File};
 use std::hint::black_box;
 use std::io::Write;
@@ -41,7 +41,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut rng = StdRng::seed_from_u64(42);
     let mut results = Vec::new();
 
-    let target_lens = vec![30_000];
+    let target_lens = vec![100000];
     let query_lens = vec![24, 32];
     let ks = vec![4];
     let iterations = 100;
@@ -93,7 +93,7 @@ fn run_bench_round(
         queries.push(generate_random_dna(rng, query_len));
     }
 
-    let mut searcher = Searcher::<Dna>::new_fwd();
+    let mut searcher = Searcher::<Iupac>::new_fwd();
     let transposed = TQueries::new(&queries);
 
     let sassy_total = time_iterations(iterations, || {
@@ -136,7 +136,7 @@ fn run_bench_round(
 }
 
 fn generate_random_dna(rng: &mut StdRng, len: usize) -> Vec<u8> {
-    let bases = [b'A', b'T', b'G', b'C'];
+    let bases = [b'A', b'T', b'G', b'C', b'N', b'R'];
     let mut dna = Vec::with_capacity(len);
     for _ in 0..len {
         let idx = rng.gen_range(0..bases.len());

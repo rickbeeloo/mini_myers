@@ -13,7 +13,7 @@
 //! - Short queries (≤32 nucleotides)
 //! - Multiple queries to search (best performance with multiples of 8)
 //! - Only need edit distance, not positions
-//! - Standard DNA characters only (A, C, G, T) - no IUPAC ambiguity codes
+//! - Supports DNA IUPAC codes (A, C, G, T, N, etc)
 //!
 //! ## Example
 //!
@@ -43,6 +43,8 @@ use core::simd::Simd;
 use std::simd::cmp::{SimdOrd, SimdPartialEq, SimdPartialOrd};
 use std::simd::{LaneCount, SupportedLaneCount};
 
+const IUPAC_MASKS: usize = 16;
+
 /// Transposed query representation for efficient SIMD batch processing.
 ///
 /// This structure stores queries in a transposed format.
@@ -66,14 +68,8 @@ pub struct TQueries {
     pub query_length: usize,
     /// Number of queries (must be ≤32)
     pub n_queries: usize,
-    /// Precomputed peq bitvector for nucleotide 'A'
-    pub peq_a: Vec<u32>,
-    /// Precomputed peq bitvector for nucleotide 'C'
-    pub peq_c: Vec<u32>,
-    /// Precomputed peq bitvector for nucleotide 'G'
-    pub peq_g: Vec<u32>,
-    /// Precomputed peq bitvector for nucleotide 'T'
-    pub peq_t: Vec<u32>,
+    /// Precomputed peq bitvectors keyed by IUPAC mask (0..=15)
+    pub peq_masks: [Vec<u32>; IUPAC_MASKS],
 }
 
 impl TQueries {
@@ -86,7 +82,7 @@ impl TQueries {
     /// # Arguments
     ///
     /// * `queries` - A slice of byte vectors, where each vector represents one query sequence.
-    ///   Each query must contain only DNA nucleotides (A, C, G, T). IUPAC is not supported yet.
+    ///   Each query must contain valid IUPAC nucleotide codes.
     ///
     /// # Examples
     ///
@@ -107,56 +103,44 @@ impl TQueries {
         let n_queries = queries.len();
         assert!(n_queries <= 32, "Number of queries exceeds 32");
 
-        let mut vectors: Vec<Simd<u8, 32>> = Vec::with_capacity(query_length);
+        assert!(
+            query_length > 0 && query_length <= 32,
+            "Query length must be 1..=32"
+        );
 
-        for i in 0..query_length {
-            let mut lane: [u8; 32] = [0u8; 32];
-            for (q_idx, q) in queries.iter().enumerate() {
-                lane[q_idx] = q[i];
-            }
-            vectors.push(Simd::from_array(lane));
-        }
+        let mut vector_data: Vec<[u8; 32]> = vec![[0u8; 32]; query_length];
+        let mut peq_masks: [Vec<u32>; IUPAC_MASKS] = std::array::from_fn(|_| vec![0u32; n_queries]);
 
-        // Precompute peq bitvectors (independent of LANES, computed once)
-        let mut peq_a = vec![0u32; n_queries];
-        let mut peq_c = vec![0u32; n_queries];
-        let mut peq_g = vec![0u32; n_queries];
-        let mut peq_t = vec![0u32; n_queries];
+        for (qi, q) in queries.iter().enumerate() {
+            for (pos, &raw_c) in q.iter().enumerate() {
+                let encoded = get_encoded(raw_c);
+                assert!(
+                    encoded != INVALID_IUPAC,
+                    "Query at index {} contains invalid IUPAC character: {:?}",
+                    qi,
+                    raw_c as char
+                );
 
-        for pos in 0..query_length {
-            let qv_simd = vectors[pos];
-            let bit = 1u32 << pos;
-
-            let a_mask = qv_simd.simd_eq(Simd::<u8, 32>::splat(b'A')).to_bitmask();
-            let c_mask = qv_simd.simd_eq(Simd::<u8, 32>::splat(b'C')).to_bitmask();
-            let g_mask = qv_simd.simd_eq(Simd::<u8, 32>::splat(b'G')).to_bitmask();
-            let t_mask = qv_simd.simd_eq(Simd::<u8, 32>::splat(b'T')).to_bitmask();
-
-            for qi in 0..n_queries {
-                let lane_bit = 1u64 << qi;
-                if (a_mask & lane_bit) != 0 {
-                    peq_a[qi] |= bit;
-                }
-                if (c_mask & lane_bit) != 0 {
-                    peq_c[qi] |= bit;
-                }
-                if (g_mask & lane_bit) != 0 {
-                    peq_g[qi] |= bit;
-                }
-                if (t_mask & lane_bit) != 0 {
-                    peq_t[qi] |= bit;
+                vector_data[pos][qi] = raw_c.to_ascii_uppercase();
+                let bit = 1u32 << pos;
+                if encoded != 0 {
+                    for (mask_idx, mask_vec) in peq_masks.iter_mut().enumerate().skip(1) {
+                        let mask = mask_idx as u8;
+                        if (encoded & mask) != 0 {
+                            mask_vec[qi] |= bit;
+                        }
+                    }
                 }
             }
         }
+
+        let vectors = vector_data.into_iter().map(Simd::from_array).collect();
 
         Self {
             vectors,
             query_length,
             n_queries,
-            peq_a,
-            peq_c,
-            peq_g,
-            peq_t,
+            peq_masks,
         }
     }
 }
@@ -214,53 +198,35 @@ pub fn mini_search(transposed: &TQueries, target: &[u8], k: u8) -> Vec<i32> {
     }
 }
 
-/// Build peqs vectors from peq arrays
+/// Build peqs vectors from precomputed masks.
 #[inline(always)]
 fn build_peqs_vectors<const LANES: usize>(
-    peq_a: &[u32],
-    peq_c: &[u32],
-    peq_g: &[u32],
-    peq_t: &[u32],
+    peq_masks: &[Vec<u32>; IUPAC_MASKS],
     nq: usize,
     vectors_in_block: usize,
-) -> (
-    Vec<Simd<i32, LANES>>,
-    Vec<Simd<i32, LANES>>,
-    Vec<Simd<i32, LANES>>,
-    Vec<Simd<i32, LANES>>,
-)
+) -> [Vec<Simd<i32, LANES>>; IUPAC_MASKS]
 where
     LaneCount<LANES>: SupportedLaneCount,
 {
-    let mut peqs_a: Vec<Simd<i32, LANES>> = Vec::with_capacity(vectors_in_block);
-    let mut peqs_c: Vec<Simd<i32, LANES>> = Vec::with_capacity(vectors_in_block);
-    let mut peqs_g: Vec<Simd<i32, LANES>> = Vec::with_capacity(vectors_in_block);
-    let mut peqs_t: Vec<Simd<i32, LANES>> = Vec::with_capacity(vectors_in_block);
+    let mut peqs: [Vec<Simd<i32, LANES>>; IUPAC_MASKS] =
+        std::array::from_fn(|_| Vec::with_capacity(vectors_in_block));
 
     for v in 0..vectors_in_block {
         let base = v * LANES;
-        let mut lane_a = [0i32; LANES];
-        let mut lane_c = [0i32; LANES];
-        let mut lane_g = [0i32; LANES];
-        let mut lane_t = [0i32; LANES];
-
-        for l in 0..LANES {
-            let qi = base + l;
-            if qi < nq {
-                lane_a[l] = peq_a[qi] as i32;
-                lane_c[l] = peq_c[qi] as i32;
-                lane_g[l] = peq_g[qi] as i32;
-                lane_t[l] = peq_t[qi] as i32;
+        for mask_idx in 0..IUPAC_MASKS {
+            let mut lane = [0i32; LANES];
+            let mask_vec = &peq_masks[mask_idx];
+            for (lane_idx, lane_slot) in lane.iter_mut().enumerate() {
+                let qi = base + lane_idx;
+                if qi < nq {
+                    *lane_slot = mask_vec[qi] as i32;
+                }
             }
+            peqs[mask_idx].push(Simd::from_array(lane));
         }
-
-        peqs_a.push(Simd::from_array(lane_a));
-        peqs_c.push(Simd::from_array(lane_c));
-        peqs_g.push(Simd::from_array(lane_g));
-        peqs_t.push(Simd::from_array(lane_t));
     }
 
-    (peqs_a, peqs_c, peqs_g, peqs_t)
+    peqs
 }
 
 #[inline(always)]
@@ -273,23 +239,12 @@ where
     let nq = transposed.n_queries;
     let m = transposed.query_length;
 
-    let peq_a = &transposed.peq_a;
-    let peq_c = &transposed.peq_c;
-    let peq_g = &transposed.peq_g;
-    let peq_t = &transposed.peq_t;
+    let peq_masks = &transposed.peq_masks;
 
     let vectors_in_block = nq.div_ceil(LANES);
     //println!("Using {} vectors in block", vectors_in_block);
 
-    let (peqs_a, peqs_c, peqs_g, peqs_t) =
-        build_peqs_vectors(peq_a, peq_c, peq_g, peq_t, nq, vectors_in_block);
-
-    let peq_table: [&[Simd<i32, LANES>]; 4] = [
-        peqs_a.as_slice(),
-        peqs_c.as_slice(),
-        peqs_t.as_slice(),
-        peqs_g.as_slice(),
-    ];
+    let peqs = build_peqs_vectors(peq_masks, nq, vectors_in_block);
 
     let all_ones = Simd::<i32, LANES>::splat(!0i32);
     let zero_v = Simd::<i32, LANES>::splat(0i32);
@@ -310,8 +265,11 @@ where
     let target_len = target.len();
     for t_idx in 0..target_len {
         let tb = unsafe { target.get_unchecked(t_idx) };
-        let idx = (tb >> 1) & 3;
-        let peq_slice = unsafe { peq_table.get_unchecked(idx as usize) };
+        let encoded = get_encoded(*tb);
+        if encoded == INVALID_IUPAC {
+            panic!("Target contains invalid IUPAC character: {:?}", *tb as char);
+        }
+        let peq_slice = unsafe { peqs.get_unchecked(encoded as usize) };
         for v in 0..vectors_in_block {
             // Regular Myers
             let eq = unsafe { peq_slice.get_unchecked(v) };
@@ -354,8 +312,80 @@ where
     result
 }
 
+const INVALID_IUPAC: u8 = 255;
+
+#[inline(always)]
+fn get_encoded(c: u8) -> u8 {
+    IUPAC_CODE[(c & 0x1F) as usize]
+}
+
+// Based on sassy: https://github.com/RagnarGrootKoerkamp/sassy/blob/master/src/profiles/iupac.rs#L258
+#[rustfmt::skip]
+const IUPAC_CODE: [u8; 32] = {
+    let mut t = [INVALID_IUPAC; 32];
+    const A: u8 = 1 << 0;
+    const C: u8 = 1 << 1;
+    const T: u8 = 1 << 2;
+    const G: u8 = 1 << 3;
+
+    t[b'A' as usize & 0x1F] = A;
+    t[b'C' as usize & 0x1F] = C;
+    t[b'T' as usize & 0x1F] = T;
+    t[b'U' as usize & 0x1F] = T;
+    t[b'G' as usize & 0x1F] = G;
+    t[b'N' as usize & 0x1F] = A | C | T | G;
+
+    t[b'R' as usize & 0x1F] = A | G;
+    t[b'Y' as usize & 0x1F] = C | T;
+    t[b'S' as usize & 0x1F] = G | C;
+    t[b'W' as usize & 0x1F] = A | T;
+    t[b'K' as usize & 0x1F] = G | T;
+    t[b'M' as usize & 0x1F] = A | C;
+    t[b'B' as usize & 0x1F] = C | G | T;
+    t[b'D' as usize & 0x1F] = A | G | T;
+    t[b'H' as usize & 0x1F] = A | C | T;
+    t[b'V' as usize & 0x1F] = A | C | G;
+
+    t[b'X' as usize & 0x1F] = 0;
+
+    t
+};
+
+#[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_iupac_query_matches_standard_target() {
+        let queries = vec![b"n".to_vec()];
+        let transposed = TQueries::new(&queries);
+        assert_eq!(mini_search(&transposed, b"A", 0), vec![0]);
+        assert_eq!(mini_search(&transposed, b"a", 0), vec![0]);
+    }
+
+    #[test]
+    fn test_iupac_target_matches_standard_query() {
+        let queries = vec![b"A".to_vec()];
+        let transposed = TQueries::new(&queries);
+        assert_eq!(mini_search(&transposed, b"N", 0), vec![0]);
+        assert_eq!(mini_search(&transposed, b"n", 0), vec![0]);
+    }
+
+    #[test]
+    fn test_iupac_mismatch_requires_edit() {
+        let queries = vec![b"R".to_vec()];
+        let transposed = TQueries::new(&queries);
+        assert_eq!(mini_search(&transposed, b"C", 0), vec![-1]);
+        assert_eq!(mini_search(&transposed, b"C", 1), vec![1]);
+        assert_eq!(mini_search(&transposed, b"c", 1), vec![1]);
+    }
+
+    #[test]
+    #[should_panic(expected = "invalid IUPAC character")]
+    fn test_invalid_query_panics() {
+        let queries = vec![b"AZ".to_vec()];
+        let _ = TQueries::new(&queries);
+    }
 
     #[test]
     fn test_mini_search() {
