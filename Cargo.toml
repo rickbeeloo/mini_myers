@@ -1,0 +1,27 @@
+[package]
+name = "mini_myers"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "mini_myers"
+path = "src/lib.rs"
+
+[[bin]]
+name = "mini_myers"
+path = "src/main.rs"
+
+[dependencies]
+
+[dev-dependencies]
+sassy = "0.1.4"
+rand = "0.8.5"
+
+
+[[bench]]
+name = "sassy"
+path = "benches/sassy.rs"
+harness = false
+
+[profile.release]
+debug = true
