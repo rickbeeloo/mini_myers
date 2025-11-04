@@ -1,5 +1,5 @@
 ### 🤏 Mini Myers
-Simple Myers implementation to "check" whether short patterns (<=32nt) are present in a longer 
+Simple SIMD Myers implementation to "check" whether short patterns (<=32nt) are present in a longer 
 text with at most `k` edits. 
 
 ### When to use
