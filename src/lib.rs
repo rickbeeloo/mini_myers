@@ -209,7 +209,6 @@ where
             // Track edit distance cost
             let ph_bit = (ph & mask_vec).simd_ne(zero_v).to_int() & one_v;
             let mh_bit = (mh & mask_vec).simd_ne(zero_v).to_int() & one_v;
-            let new_score = unsafe { *scores_vec.get_unchecked(v) } + (ph_bit - mh_bit);
             let ph_shift = ph << 1;
             let new_pv = (mh << 1) | !(xv | ph_shift);
             let new_mv = ph_shift & xv;
@@ -217,6 +216,7 @@ where
             unsafe {
                 *pv_vec.get_unchecked_mut(v) = new_pv;
                 *mv_vec.get_unchecked_mut(v) = new_mv;
+                let new_score = *scores_vec.get_unchecked(v) + (ph_bit - mh_bit);
                 *scores_vec.get_unchecked_mut(v) = new_score;
                 *min_scores_vec.get_unchecked_mut(v) =
                     min_scores_vec.get_unchecked(v).simd_min(new_score);
