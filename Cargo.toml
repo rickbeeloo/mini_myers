@@ -41,7 +41,7 @@ latest_wide = ["dep:wide_v08"]
 # When latest_wide is enabled, old_wide should be disabled
 
 [dev-dependencies]
-sassy = { git = "https://github.com/RagnarGrootKoerkamp/sassy.git" }
+sassy = "0.1.6"
 rand = "0.8.5"
 
 [[bench]]

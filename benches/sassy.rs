@@ -1,8 +1,8 @@
-use mini_myers::{TQueries, mini_search};
+use mini_myers::{mini_search, TQueries};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
-use sassy::Searcher;
 use sassy::profiles::{Dna, Iupac};
+use sassy::Searcher;
 use std::fs::{self, File};
 use std::hint::black_box;
 use std::io::Write;
@@ -95,6 +95,7 @@ fn run_bench_round(
 
     let mut searcher = Searcher::<Iupac>::new_fwd();
     let transposed = TQueries::new(&queries);
+    let mut results = Vec::new();
 
     let sassy_total = time_iterations(iterations, || {
         for q in &queries {
