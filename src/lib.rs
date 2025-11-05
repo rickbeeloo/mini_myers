@@ -18,7 +18,7 @@
 //! ## Example
 //!
 //! ```rust
-//! use mini_myers::{TQueries, mini_search};
+//! use mini_myers::{TQueries, mini_search, MyersSearchState};
 //!
 //! // Prepare queries
 //! let queries = vec![b"ATG".to_vec(), b"TTG".to_vec()];
@@ -26,7 +26,8 @@
 //!
 //! // Search in target sequence
 //! let target = b"CCCTCGCCCCCCATGCCCCC";
-//! let result = mini_search(&transposed, target, 4, None);
+//! let mut state = MyersSearchState::new();
+//! let result = mini_search(&mut state, &transposed, target, 4, None);
 //!
 //! // Result: [0, 1] means ATG has 0 edits, TTG has 1 edit
 //! assert_eq!(result, vec![0.0, 1.0]);
@@ -51,5 +52,5 @@ pub mod search;
 pub mod tqueries;
 
 // Re-export commonly used items at the crate root
-pub use search::{mini_search, mini_search_with_positions, MatchInfo};
+pub use search::{mini_search, mini_search_with_positions, MatchInfo, MyersSearchState};
 pub use tqueries::TQueries;

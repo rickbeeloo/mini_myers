@@ -1,4 +1,4 @@
-use mini_myers::{mini_search_with_positions, TQueries};
+use mini_myers::{mini_search_with_positions, MyersSearchState, TQueries};
 
 #[allow(dead_code)]
 fn generate_random_dna(l: usize) -> Vec<u8> {
@@ -25,6 +25,7 @@ fn main() {
     let transposed = TQueries::new(&queries);
     let target = generate_random_dna(10_000_000);
     let mut results = Vec::new();
-    mini_search_with_positions(&transposed, &target, 4, None, &mut results);
+    let mut state = MyersSearchState::new();
+    mini_search_with_positions(&mut state, &transposed, &target, 4, None, &mut results);
     black_box(&results);
 }

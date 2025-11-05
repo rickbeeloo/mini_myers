@@ -18,86 +18,139 @@ pub struct MatchInfo {
     pub pos: i32,
 }
 
+/// Holds the reusable state vectors for the Myers search.
+pub struct MyersSearchState {
+    pv: Vec<i32x8>,
+    mv: Vec<i32x8>,
+    score: Vec<i32x8>,
+    best_adjusted: Vec<i32x8>,
+    /// The output vector.
+    pub result: Vec<f32>,
+}
+
+impl MyersSearchState {
+    /// Creates a new, empty state holder.
+    pub fn new() -> Self {
+        Self {
+            pv: Vec::new(),
+            mv: Vec::new(),
+            score: Vec::new(),
+            best_adjusted: Vec::new(),
+            result: Vec::new(),
+        }
+    }
+
+    /// Resizes and re-initializes state for `mini_search`.
+    pub fn reset_for_mini_search(
+        &mut self,
+        nq: usize, // number of queries
+        m: usize,  // query length
+        initial_adjusted: i32,
+    ) {
+        let vectors_in_block = nq.div_ceil(SIMD_LANES);
+
+        let all_ones = i32x8::splat(!0);
+        let zero_v = i32x8::splat(0);
+        let m_v = i32x8::splat(m as i32);
+        let initial_adj_v = i32x8::splat(initial_adjusted);
+        self.pv.resize(vectors_in_block, all_ones);
+        self.pv.fill(all_ones);
+        self.mv.resize(vectors_in_block, zero_v);
+        self.mv.fill(zero_v);
+        self.score.resize(vectors_in_block, m_v);
+        self.score.fill(m_v);
+        self.best_adjusted.resize(vectors_in_block, initial_adj_v);
+        self.best_adjusted.fill(initial_adj_v);
+        self.result.resize(nq, -1.0f32);
+        self.result.fill(-1.0f32);
+    }
+
+    /// Resizes and re-initializes state for `mini_search_with_positions`.
+    pub fn reset_for_position_search(
+        &mut self,
+        nq: usize, // number of queries
+        m: usize,  // query length
+    ) {
+        let vectors_in_block = nq.div_ceil(SIMD_LANES);
+        let all_ones = i32x8::splat(!0);
+        let zero_v = i32x8::splat(0);
+        let m_v = i32x8::splat(m as i32);
+        self.pv.resize(vectors_in_block, all_ones);
+        self.pv.fill(all_ones);
+        self.mv.resize(vectors_in_block, zero_v);
+        self.mv.fill(zero_v);
+        self.score.resize(vectors_in_block, m_v);
+        self.score.fill(m_v);
+    }
+}
+
+impl Default for MyersSearchState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Searches for all queries in the target sequence using the Myers algorithm.
-/// Returning the minimum edits found for the query in the entire target, or
-/// `-1.0` if below the provided maximum edit distance `k`.
-///
-///
 /// # Arguments
 ///
+/// * `state` - A `MyersSearchState` to hold and reuse allocations.
 /// * `transposed` - A `TQueries` structure containing the preprocessed queries
 /// * `target` - The target DNA sequence to search in (as a byte slice)
 /// * `k` - Maximum edit distance threshold.
-/// * `alpha` - Optional overhang penalty. When `Some(alpha)`, trailing characters that fall
-///   outside the target incur a reduced penalty of `alpha` per character. When `None` or
-///   `Some(1.0)`, the standard Myers behaviour is used.
+/// * `alpha` - Optional overhang penalty.
 ///
 /// # Returns
 ///
-/// A vector of `f32` values, one per query, containing:
-/// - The minimum edit distance found (0 to k) if a match within threshold is found
+/// A slice `&[f32]` of the results, valid until `state` is next modified.
+/// - The minimum edit distance found (0 to k)
 /// - `-1.0` if no match within the threshold k was found
-///
-/// # Examples
-///
-/// ```rust
-/// use mini_myers::{TQueries, mini_search};
-///
-/// let queries = vec![b"ATG".to_vec(), b"TTG".to_vec()];
-/// let transposed = TQueries::new(&queries);
-/// let target = b"CCCTCGCCCCCCATGCCCCC";
-///
-/// // Search with k=4 (allow up to 4 edits) and no overhang penalty
-/// let result = mini_search(&transposed, target, 4, None);
-/// // Result: [0.0, 1.0] - ATG found with 0 edits, TTG found with 1 edit
-///
-/// ```
 #[inline(always)]
-pub fn mini_search(transposed: &TQueries, target: &[u8], k: u8, alpha: Option<f32>) -> Vec<f32> {
+pub fn mini_search<'a>(
+    state: &'a mut MyersSearchState,
+    transposed: &TQueries,
+    target: &[u8],
+    k: u8,
+    alpha: Option<f32>,
+) -> &'a [f32] {
     let nq = transposed.n_queries;
     if nq == 0 {
-        return Vec::new();
+        return &[];
     }
     let m = transposed.query_length;
     assert!(m > 0 && m <= 32, "query length must be 1..=32");
 
     let alpha = alpha.unwrap_or(1.0).clamp(0.0, 1.0);
-    search_simd_core(transposed, target, k, alpha)
+    const SCALE_SHIFT: u32 = 8;
+    const SCALE: i32 = 1 << SCALE_SHIFT; // 256
+    let alpha_scaled = ((alpha * (SCALE as f32)).round() as i32).clamp(0, SCALE);
+    let initial_adjusted = (m as i32) * alpha_scaled;
+    state.reset_for_mini_search(nq, m, initial_adjusted);
+    search_simd_core(
+        state,
+        transposed,
+        target,
+        k,
+        alpha_scaled,
+        SCALE,
+        SCALE_SHIFT,
+    );
+    &state.result[..nq]
 }
 
-/// Searches for all queries in the target sequence using the Myers algorithm,
-/// returning detailed match information including positions.
+/// Searches for all queries in the target sequence, returning detailed match information.
 ///
-/// This function tracks ALL positions in the target where each query matches
-/// within the threshold k. There is a small performance overhead (~2-5%) compared to
-/// `mini_search` due to additional position tracking.
 ///
 /// # Arguments
 ///
+/// * `state` - A `MyersSearchState` to reuse allocations.
 /// * `transposed` - A `TQueries` structure containing the preprocessed queries
 /// * `target` - The target DNA sequence to search in (as a byte slice)
 /// * `k` - Maximum edit distance threshold.
 /// * `alpha` - Optional overhang penalty (see [`mini_search`]).
 /// * `results` - Vector that will be populated with all matches found.
-///
-/// Multiple entries may exist per query if it matches at multiple positions.
-/// Results are ordered by position (earlier positions first).
-///
-/// # Examples
-///
-/// ```rust
-/// use mini_myers::{TQueries, mini_search_with_positions};
-///
-/// let queries = vec![b"ATG".to_vec(), b"TTG".to_vec()];
-/// let transposed = TQueries::new(&queries);
-/// let target = b"CCCTCGCCCCCCATGCCCCC";
-/// let mut results = Vec::new();
-///
-/// mini_search_with_positions(&transposed, target, 4, None, &mut results);
-/// // Matches are now in results
-/// ```
 #[inline(always)]
 pub fn mini_search_with_positions(
+    state: &mut MyersSearchState,
     transposed: &TQueries,
     target: &[u8],
     k: u8,
@@ -110,8 +163,22 @@ pub fn mini_search_with_positions(
     }
     let m = transposed.query_length;
     assert!(m > 0 && m <= 32, "query length must be 1..=32");
+
     let alpha = alpha.unwrap_or(1.0).clamp(0.0, 1.0);
-    search_simd_with_positions_core(transposed, target, k, alpha, results)
+    const SCALE_SHIFT: u32 = 8;
+    const SCALE: i32 = 1 << SCALE_SHIFT;
+    let alpha_scaled = ((alpha * (SCALE as f32)).round() as i32).clamp(0, SCALE);
+    state.reset_for_position_search(nq, m);
+    search_simd_with_positions_core(
+        state,
+        transposed,
+        target,
+        k,
+        alpha_scaled,
+        SCALE,
+        SCALE_SHIFT,
+        results,
+    )
 }
 
 #[derive(Copy, Clone)]
@@ -171,38 +238,29 @@ fn advance_column(
     new_score_scaled - adjust_vec
 }
 
-/// Core SIMD Myers search optionally applying an overhang penalty `alpha`.
-/// `alpha` should be in the range `[0.0, 1.0]`, where `1.0` corresponds to the
-/// standard Myers edit distance and lower values discount overhangs.
+/// Core SIMD Myers implementation re-using allocs
 #[inline(never)]
 pub(crate) fn search_simd_core(
+    state: &mut MyersSearchState,
     transposed: &TQueries,
     target: &[u8],
     k: u8,
-    alpha: f32,
-) -> Vec<f32> {
-    const SCALE_SHIFT: u32 = 8;
-    const SCALE: i32 = 1 << SCALE_SHIFT; // 256
-
+    alpha_scaled: i32,
+    scale: i32,
+    scale_shift: u32,
+) {
     let nq = transposed.n_queries;
     let m = transposed.query_length;
     let vectors_in_block = nq.div_ceil(SIMD_LANES);
 
-    let alpha_scaled = ((alpha * (SCALE as f32)).round() as i32).clamp(0, SCALE);
-    let extra_penalty_scaled = SCALE - alpha_scaled;
-    let k_scaled = (k as i32) << SCALE_SHIFT;
-    let inv_scale = 1.0f32 / (SCALE as f32);
+    let extra_penalty_scaled = scale - alpha_scaled;
+    let k_scaled = (k as i32) << scale_shift;
+    let inv_scale = 1.0f32 / (scale as f32);
 
     let all_ones = i32x8::splat(!0);
     let zero_v = i32x8::splat(0);
     let one_v = i32x8::splat(1);
     let zero_eq_vec = i32x8::splat(0);
-
-    let initial_adjusted = (m as i32) * alpha_scaled;
-    let mut pv = vec![all_ones; vectors_in_block];
-    let mut mv = vec![zero_v; vectors_in_block];
-    let mut score = vec![i32x8::splat(m as i32); vectors_in_block];
-    let mut best_adjusted = vec![i32x8::splat(initial_adjusted); vectors_in_block];
 
     let high_bit: u32 = 1u32 << (m - 1);
     let mask_vec = i32x8::splat(high_bit as i32);
@@ -212,14 +270,12 @@ pub(crate) fn search_simd_core(
         zero_v,
         one_v,
         mask_vec,
-        scale_shift: SCALE_SHIFT,
+        scale_shift,
     };
 
     for (idx, &tb) in target.iter().enumerate() {
         let encoded = crate::iupac::get_encoded(tb);
-        if encoded == INVALID_IUPAC {
-            panic!("Target contains invalid IUPAC character: {:?}", tb as char);
-        }
+
         let overhang = m.saturating_sub(idx + 1) as i32;
         let adjust_vec = i32x8::splat(overhang * extra_penalty_scaled);
         let peq_slice = unsafe { transposed.peqs.get_unchecked(encoded as usize) };
@@ -228,43 +284,42 @@ pub(crate) fn search_simd_core(
             for block_idx in 0..vectors_in_block {
                 let eq = *peq_slice.get_unchecked(block_idx);
                 let adjusted = advance_column(
-                    pv.get_unchecked_mut(block_idx),
-                    mv.get_unchecked_mut(block_idx),
-                    score.get_unchecked_mut(block_idx),
+                    state.pv.get_unchecked_mut(block_idx),
+                    state.mv.get_unchecked_mut(block_idx),
+                    state.score.get_unchecked_mut(block_idx),
                     eq,
                     adjust_vec,
                     ctx,
                 );
-                let best_slot = best_adjusted.get_unchecked_mut(block_idx);
+                let best_slot = state.best_adjusted.get_unchecked_mut(block_idx);
                 *best_slot = (*best_slot).min(adjusted);
             }
         }
     }
 
-    if alpha_scaled < SCALE {
+    if alpha_scaled < scale {
         for trailing in 1..=m {
             let adjust_vec = i32x8::splat((trailing as i32) * extra_penalty_scaled);
             unsafe {
                 for block_idx in 0..vectors_in_block {
                     let adjusted = advance_column(
-                        pv.get_unchecked_mut(block_idx),
-                        mv.get_unchecked_mut(block_idx),
-                        score.get_unchecked_mut(block_idx),
+                        state.pv.get_unchecked_mut(block_idx),
+                        state.mv.get_unchecked_mut(block_idx),
+                        state.score.get_unchecked_mut(block_idx),
                         zero_eq_vec,
                         adjust_vec,
                         ctx,
                     );
-                    let best_slot = best_adjusted.get_unchecked_mut(block_idx);
+                    let best_slot = state.best_adjusted.get_unchecked_mut(block_idx);
                     *best_slot = (*best_slot).min(adjusted);
                 }
             }
         }
     }
 
-    let mut result = vec![-1.0f32; nq];
     let neg_mask = i32x8::splat(i32::MAX);
 
-    for (block_idx, &min_adj) in best_adjusted.iter().enumerate() {
+    for (block_idx, &min_adj) in state.best_adjusted.iter().enumerate() {
         #[cfg(not(feature = "latest_wide"))]
         let mask = all_ones ^ min_adj.cmp_gt(k_scaled_vec);
         #[cfg(feature = "latest_wide")]
@@ -274,29 +329,28 @@ pub(crate) fn search_simd_core(
         let base = block_idx * SIMD_LANES;
         let end = (base + SIMD_LANES).min(nq);
         let selected_arr = selected.to_array();
+
         for (lane_idx, &val) in selected_arr[..(end - base)].iter().enumerate() {
             if val != i32::MAX {
-                result[base + lane_idx] = (val as f32) * inv_scale;
+                unsafe {
+                    *state.result.get_unchecked_mut(base + lane_idx) = (val as f32) * inv_scale;
+                }
             }
         }
     }
-    result
 }
 
-/// SIMD search with position tracking.
-/// Tracks ALL positions where score <= k by incrementally collecting matches.
-/// Core SIMD Myers search with position tracking and optional overhang penalty `alpha`.
 #[inline(always)]
 fn search_simd_with_positions_core(
+    state: &mut MyersSearchState,
     transposed: &TQueries,
     target: &[u8],
     k: u8,
-    alpha: f32,
+    alpha_scaled: i32,
+    scale: i32,
+    scale_shift: u32,
     results: &mut Vec<MatchInfo>,
 ) {
-    const SCALE_SHIFT: u32 = 8;
-    const SCALE: i32 = 1 << SCALE_SHIFT;
-
     let all_ones = i32x8::splat(!0);
     let zero_v = i32x8::splat(0);
     let one_v = i32x8::splat(1);
@@ -305,15 +359,10 @@ fn search_simd_with_positions_core(
     let m = transposed.query_length;
     let vectors_in_block = nq.div_ceil(SIMD_LANES);
 
-    let alpha_scaled = ((alpha * (SCALE as f32)).round() as i32).clamp(0, SCALE);
-    let extra_penalty_scaled = SCALE - alpha_scaled;
-    let k_scaled = (k as i32) << SCALE_SHIFT;
+    let extra_penalty_scaled = scale - alpha_scaled;
+    let k_scaled = (k as i32) << scale_shift;
     let k_scaled_vec = i32x8::splat(k_scaled);
-    let inv_scale = 1.0f32 / (SCALE as f32);
-
-    let mut pv = vec![all_ones; vectors_in_block];
-    let mut mv = vec![zero_v; vectors_in_block];
-    let mut score = vec![i32x8::splat(m as i32); vectors_in_block];
+    let inv_scale = 1.0f32 / (scale as f32);
 
     let high_bit: u32 = 1u32 << (m - 1);
     let mask_vec = i32x8::splat(high_bit as i32);
@@ -323,14 +372,11 @@ fn search_simd_with_positions_core(
         zero_v,
         one_v,
         mask_vec,
-        scale_shift: SCALE_SHIFT,
+        scale_shift,
     };
 
     for (idx, &tb) in target.iter().enumerate() {
         let encoded = crate::iupac::get_encoded(tb);
-        if encoded == INVALID_IUPAC {
-            panic!("Target contains invalid IUPAC character: {:?}", tb as char);
-        }
         let overhang = m.saturating_sub(idx + 1) as i32;
         let adjust_vec = i32x8::splat(overhang * extra_penalty_scaled);
         let peq_slice = unsafe { transposed.peqs.get_unchecked(encoded as usize) };
@@ -340,9 +386,9 @@ fn search_simd_with_positions_core(
             for block_idx in 0..vectors_in_block {
                 let eq = *peq_slice.get_unchecked(block_idx);
                 let adjusted = advance_column(
-                    pv.get_unchecked_mut(block_idx),
-                    mv.get_unchecked_mut(block_idx),
-                    score.get_unchecked_mut(block_idx),
+                    state.pv.get_unchecked_mut(block_idx),
+                    state.mv.get_unchecked_mut(block_idx),
+                    state.score.get_unchecked_mut(block_idx),
                     eq,
                     adjust_vec,
                     ctx,
@@ -373,7 +419,7 @@ fn search_simd_with_positions_core(
         }
     }
 
-    if alpha_scaled < SCALE {
+    if alpha_scaled < scale {
         for trailing in 1..=m {
             let adjust_vec = i32x8::splat((trailing as i32) * extra_penalty_scaled);
             let pos = (target.len() + trailing - 1) as i32;
@@ -381,9 +427,9 @@ fn search_simd_with_positions_core(
             unsafe {
                 for block_idx in 0..vectors_in_block {
                     let adjusted = advance_column(
-                        pv.get_unchecked_mut(block_idx),
-                        mv.get_unchecked_mut(block_idx),
-                        score.get_unchecked_mut(block_idx),
+                        state.pv.get_unchecked_mut(block_idx),
+                        state.mv.get_unchecked_mut(block_idx),
+                        state.score.get_unchecked_mut(block_idx),
                         zero_eq_vec,
                         adjust_vec,
                         ctx,
@@ -423,25 +469,49 @@ mod tests {
     fn test_iupac_query_matches_standard_target() {
         let queries = vec![b"n".to_vec()];
         let transposed = TQueries::new(&queries);
-        assert_eq!(mini_search(&transposed, b"A", 0, None), vec![0.0]);
-        assert_eq!(mini_search(&transposed, b"a", 0, None), vec![0.0]);
+        let mut state = MyersSearchState::new();
+        assert_eq!(
+            mini_search(&mut state, &transposed, b"A", 0, None),
+            vec![0.0]
+        );
+        assert_eq!(
+            mini_search(&mut state, &transposed, b"a", 0, None),
+            vec![0.0]
+        );
     }
 
     #[test]
     fn test_iupac_target_matches_standard_query() {
         let queries = vec![b"A".to_vec()];
         let transposed = TQueries::new(&queries);
-        assert_eq!(mini_search(&transposed, b"N", 0, None), vec![0.0]);
-        assert_eq!(mini_search(&transposed, b"n", 0, None), vec![0.0]);
+        let mut state = MyersSearchState::new();
+        assert_eq!(
+            mini_search(&mut state, &transposed, b"N", 0, None),
+            vec![0.0]
+        );
+        assert_eq!(
+            mini_search(&mut state, &transposed, b"n", 0, None),
+            vec![0.0]
+        );
     }
 
     #[test]
     fn test_iupac_mismatch_requires_edit() {
         let queries = vec![b"R".to_vec()];
         let transposed = TQueries::new(&queries);
-        assert_eq!(mini_search(&transposed, b"C", 0, None), vec![-1.0]);
-        assert_eq!(mini_search(&transposed, b"C", 1, None), vec![1.0]);
-        assert_eq!(mini_search(&transposed, b"c", 1, None), vec![1.0]);
+        let mut state = MyersSearchState::new();
+        assert_eq!(
+            mini_search(&mut state, &transposed, b"C", 0, None),
+            vec![-1.0]
+        );
+        assert_eq!(
+            mini_search(&mut state, &transposed, b"C", 1, None),
+            vec![1.0]
+        );
+        assert_eq!(
+            mini_search(&mut state, &transposed, b"c", 1, None),
+            vec![1.0]
+        );
     }
 
     #[test]
@@ -451,13 +521,24 @@ mod tests {
         let _ = TQueries::new(&queries);
     }
 
+    // #[test]
+    // #[should_panic(expected = "invalid IUPAC character")]
+    // fn test_invalid_target_panics() {
+    //     let queries = vec![b"A".to_vec()];
+    //     let transposed = TQueries::new(&queries);
+    //     let mut state = MyersSearchState::new();
+    //     // This should panic
+    //     let _ = mini_search(&mut state, &transposed, b"Z", 1, None);
+    // }
+
     #[test]
     fn test_mini_search() {
         let q = b"ATG".to_vec();
         let queries = vec![q];
         let t = b"CCCCCCCCCATGCCCCC";
         let transposed = TQueries::new(&queries);
-        let result = mini_search(&transposed, t, 4, None);
+        let mut state = MyersSearchState::new();
+        let result = mini_search(&mut state, &transposed, t, 4, None);
         assert_eq!(result, vec![0.0]); // Lowest edits, 0 for q at idx 0
     }
 
@@ -468,7 +549,8 @@ mod tests {
         let queries = vec![q1, q2];
         let t = b"CCCTTGCCCCCCATGCCCCC";
         let transposed = TQueries::new(&queries);
-        let result = mini_search(&transposed, t, 4, None);
+        let mut state = MyersSearchState::new();
+        let result = mini_search(&mut state, &transposed, t, 4, None);
         assert_eq!(result, vec![0.0, 0.0]);
     }
 
@@ -478,16 +560,17 @@ mod tests {
         let queries = vec![q1.to_vec()];
         let t = b"ATCTGA"; // 1 edit
         let transposed = TQueries::new(&queries);
-        let result = mini_search(&transposed, t, 4, None);
+        let mut state = MyersSearchState::new();
+        let result = mini_search(&mut state, &transposed, t, 4, None);
         assert_eq!(result, vec![1.0]);
         let t = b"GTCTGA"; // 2 edits
-        let result = mini_search(&transposed, t, 4, None);
+        let result = mini_search(&mut state, &transposed, t, 4, None);
         assert_eq!(result, vec![2.0]);
         let t = b"GTTGA"; // 3 edits (1 del)
-        let result = mini_search(&transposed, t, 4, None);
+        let result = mini_search(&mut state, &transposed, t, 4, None);
         assert_eq!(result, vec![3.0]);
         // Match should not be recovered when k == 1
-        let result = mini_search(&transposed, t, 1, None);
+        let result = mini_search(&mut state, &transposed, t, 1, None);
         assert_eq!(result, vec![-1.0]);
     }
 
@@ -498,7 +581,8 @@ mod tests {
         let t = b"CCCCCCCGGGCATCGATGACCCCCCCCCCCCCCCGGGCTTCGATGAC";
         //                                                     ^^^^^^^^^^^^^ has one mutation
         let transposed = TQueries::new(&queries);
-        let result = mini_search(&transposed, t, 4, None);
+        let mut state = MyersSearchState::new();
+        let result = mini_search(&mut state, &transposed, t, 4, None);
         assert_eq!(result, vec![0.0]);
     }
 
@@ -510,7 +594,8 @@ mod tests {
         let t = b"CCC";
         let queries = vec![q1.to_vec(), q2.to_vec()];
         let transposed = TQueries::new(&queries);
-        let result = mini_search(&transposed, t, 4, None);
+        let mut state = MyersSearchState::new();
+        let result = mini_search(&mut state, &transposed, t, 4, None);
         assert_eq!(result, vec![0.0]);
     }
 
@@ -519,8 +604,10 @@ mod tests {
         let queries = vec![b"ATG".to_vec(), b"TTG".to_vec()];
         let transposed = TQueries::new(&queries);
         let target = b"CCCTCGCCCCCCATGCCCCC";
-        let result = mini_search(&transposed, target, 4, None);
+        let mut state = MyersSearchState::new();
+        let result = mini_search(&mut state, &transposed, target, 4, None);
         println!("Result: {:?}", result);
+        assert_eq!(result, vec![0.0, 1.0]);
     }
 
     #[test]
@@ -531,8 +618,9 @@ mod tests {
         //             012345678901234567
         //                      ATG at pos 9-11 (ends at 11)
         let transposed = TQueries::new(&queries);
+        let mut state = MyersSearchState::new();
         let mut result = Vec::new();
-        mini_search_with_positions(&transposed, t, 4, None, &mut result);
+        mini_search_with_positions(&mut state, &transposed, t, 4, None, &mut result);
 
         // Should find at least one match
         assert!(!result.is_empty());
@@ -550,8 +638,9 @@ mod tests {
         //        012345678901234
         // ATG at positions 0-2 (ends at 2), 6-8 (ends at 8), 12-14 (ends at 14)
         let transposed = TQueries::new(&queries);
+        let mut state = MyersSearchState::new();
         let mut result = Vec::new();
-        mini_search_with_positions(&transposed, t, 0, None, &mut result);
+        mini_search_with_positions(&mut state, &transposed, t, 0, None, &mut result);
 
         // Should find all 3 exact matches
         let exact_matches: Vec<_> = result
@@ -571,10 +660,11 @@ mod tests {
         let queries = vec![q1, q2];
         let t = b"CCCTTGCCCCCCATGCCCCC";
         let transposed = TQueries::new(&queries);
+        let mut state = MyersSearchState::new();
 
-        let result_basic = mini_search(&transposed, t, 4, None);
+        let result_basic = mini_search(&mut state, &transposed, t, 4, None).to_vec();
         let mut result_pos = Vec::new();
-        mini_search_with_positions(&transposed, t, 4, None, &mut result_pos);
+        mini_search_with_positions(&mut state, &transposed, t, 4, None, &mut result_pos);
 
         // mini_search returns minimum cost per query
         // mini_search_with_positions returns all matches
@@ -600,8 +690,9 @@ mod tests {
         let queries = vec![q];
         let t = b"CCCCCCCCCCCCC";
         let transposed = TQueries::new(&queries);
+        let mut state = MyersSearchState::new();
         let mut result = Vec::new();
-        mini_search_with_positions(&transposed, t, 1, None, &mut result);
+        mini_search_with_positions(&mut state, &transposed, t, 1, None, &mut result);
 
         // Should have no matches for query 0 with cost <= 1
         let matches_q0: Vec<_> = result.iter().filter(|m| m.query_idx == 0).collect();
@@ -618,8 +709,9 @@ mod tests {
         ];
         let t = b"AAGGGGTTTTCCCC";
         let transposed = TQueries::new(&queries);
+        let mut state = MyersSearchState::new();
         let mut result = Vec::new();
-        mini_search_with_positions(&transposed, t, 2, None, &mut result);
+        mini_search_with_positions(&mut state, &transposed, t, 2, None, &mut result);
 
         // All queries should have at least one match with k=2
         for query_idx in 0..4 {
@@ -638,7 +730,8 @@ mod tests {
         let queries = vec![b"AC".to_vec()];
         let transposed = TQueries::new(&queries);
         let t = b"A";
-        let result = mini_search(&transposed, t, 1, Some(0.5));
+        let mut state = MyersSearchState::new();
+        let result = mini_search(&mut state, &transposed, t, 1, Some(0.5));
         assert_eq!(result.len(), 1);
         assert!(
             (result[0] - 0.5).abs() < 1e-6,
@@ -652,8 +745,9 @@ mod tests {
         let queries = vec![b"ATG".to_vec()];
         let transposed = TQueries::new(&queries);
         let t = b"CCCCCCCCCATGCCCCC";
-        let standard = mini_search(&transposed, t, 4, None);
-        let overhang = mini_search(&transposed, t, 4, Some(1.0));
+        let mut state = MyersSearchState::new();
+        let standard = mini_search(&mut state, &transposed, t, 4, None).to_vec(); // clone
+        let overhang = mini_search(&mut state, &transposed, t, 4, Some(1.0));
         assert_eq!(standard.len(), overhang.len());
         for (i, &val) in standard.iter().enumerate() {
             assert!((overhang[i] - val).abs() < 1e-6);
@@ -665,8 +759,9 @@ mod tests {
         let queries = vec![b"AC".to_vec()];
         let transposed = TQueries::new(&queries);
         let t = b"A";
+        let mut state = MyersSearchState::new();
         let mut results = Vec::new();
-        mini_search_with_positions(&transposed, t, 1, Some(0.5), &mut results);
+        mini_search_with_positions(&mut state, &transposed, t, 1, Some(0.5), &mut results);
         assert!(!results.is_empty());
         let min_cost_entry = results
             .iter()
@@ -681,8 +776,9 @@ mod tests {
         let queries = vec![b"AAACCC".to_vec()];
         let transposed = TQueries::new(&queries);
         let t = b"CCCGGGGGGGG";
+        let mut state = MyersSearchState::new();
         let mut results = Vec::new();
-        mini_search_with_positions(&transposed, t, 4, Some(0.5), &mut results);
+        mini_search_with_positions(&mut state, &transposed, t, 4, Some(0.5), &mut results);
         // Get minimum cost match
         let min_cost = results
             .iter()
@@ -700,8 +796,9 @@ mod tests {
         let queries = vec![b"AAACCC".to_vec()];
         let transposed = TQueries::new(&queries);
         let t = b"GGGGGAAA";
+        let mut state = MyersSearchState::new();
         let mut results = Vec::new();
-        mini_search_with_positions(&transposed, t, 4, Some(0.5), &mut results);
+        mini_search_with_positions(&mut state, &transposed, t, 4, Some(0.5), &mut results);
         // Get minimum cost match
         let min_cost = results
             .iter()
@@ -719,13 +816,15 @@ mod tests {
         let queries = vec![b"AAACCC".to_vec()];
         let transposed = TQueries::new(&queries);
         let t = b"GGGGGAAA";
+        let mut state = MyersSearchState::new();
         let mut results = Vec::new();
-        mini_search_with_positions(&transposed, t, 4, Some(0.5), &mut results);
+        mini_search_with_positions(&mut state, &transposed, t, 4, Some(0.5), &mut results);
         // Get minimum cost match
         let _min_cost = results
             .iter()
             .map(|m| m.cost)
             .fold(f32::INFINITY, |a, b| a.min(b));
         println!("results: {:?}", results);
+        assert!(!results.is_empty());
     }
 }

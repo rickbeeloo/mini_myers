@@ -30,11 +30,12 @@ we see along the entire text and report the cost when below the cut-off `k`, or 
 #### Without position tracking
 This will just return the lowest edits found (below `k`) for each query. 
 ```rust
-use mini_myers::{TQueries, mini_search};
+use mini_myers::{TQueries, mini_search, MyersSearchState};
 
 let queries = vec![b"ATG".to_vec(), b"TTG".to_vec()];
 let transposed = TQueries::new(&queries);
 let target = b"CCCTCGCCCCCCATGCCCCC";
+let mut state = MyersSearchState::new(); // to re-use allocs
 let result = mini_search(&transposed, target, 4, None);
 println!("Result: {:?}", result); 
 // [0,1] (ATG = 0 edits, TTG = 1 edit)
@@ -43,13 +44,14 @@ println!("Result: {:?}", result);
 #### With position tracking
 
 ```rust
-use mini_myers::{TQueries, mini_search_with_positions};
+use mini_myers::{TQueries, mini_search_with_positions, MyersSearchState};
 
 let queries = vec![b"ATG".to_vec(), b"TTG".to_vec()];
 let transposed = TQueries::new(&queries);
 let target = b"CCCTCGCCCCCCATGCCCCC";
 let mut results = Vec::new();
-mini_search_with_positions(&transposed, target, 1, None, &mut results);
+let mut state = MyersSearchState::new(); // to re-use allocs
+mini_search_with_positions(&mut state, &transposed, target, 1, None, &mut results);
 println!("Result: {:?}", results);
 // Result: [MatchInfo { query_idx: 1, cost: 1, pos: 5 } ...
 ```
