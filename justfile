@@ -1,2 +1,2 @@
 doc:
-    cargo doc --open
+    cargo doc --no-deps --open

@@ -1,5 +1,6 @@
-use mini_myers::{mini_search, TQueries};
+use mini_myers::{mini_search_with_positions, TQueries};
 
+#[allow(dead_code)]
 fn generate_random_dna(l: usize) -> Vec<u8> {
     use rand::rngs::StdRng;
     use rand::{Rng, SeedableRng};
@@ -14,12 +15,10 @@ fn generate_random_dna(l: usize) -> Vec<u8> {
 }
 
 fn main() {
-    use mini_myers::{mini_search_with_positions, TQueries};
-
     let queries = vec![b"ATG".to_vec(), b"TTG".to_vec()];
     let transposed = TQueries::new(&queries);
     let target = b"CCCTCGCCCCCCATGCCCCC";
     let mut results = Vec::new();
-    let result = mini_search_with_positions(&transposed, target, 1, &mut results);
+    mini_search_with_positions(&transposed, target, 1, None, &mut results);
     println!("Result: {:?}", results);
 }

@@ -1,4 +1,4 @@
-use mini_myers::{mini_search, mini_search_with_overhang, mini_search_with_positions, TQueries};
+use mini_myers::{mini_search, mini_search_with_positions, TQueries};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use sassy::profiles::{Dna, Iupac};
@@ -41,7 +41,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut rng = StdRng::seed_from_u64(42);
     let mut results = Vec::new();
 
-    let target_lens = vec![100000];
+    let target_lens = vec![1000000];
     let query_lens = vec![15, 24, 32];
     let ks = vec![4];
     let iterations = 100;
@@ -104,9 +104,10 @@ fn run_bench_round(
         }
     });
 
-    let mini_total = time_iterations(iterations, || {
-        let result = mini_search_with_overhang(&transposed, &target, k, 0.5);
-        black_box(&result);
+    // let mut results = Vec::new();
+    let mini_total: Duration = time_iterations(iterations, || {
+        let results = mini_search(&transposed, &target, k, Some(0.5));
+        black_box(&results);
     });
 
     let queries_per_iter = queries.len();
