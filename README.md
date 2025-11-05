@@ -49,9 +49,9 @@ let queries = vec![b"ATG".to_vec(), b"TTG".to_vec()];
 let transposed = TQueries::new(&queries);
 let target = b"CCCTCGCCCCCCATGCCCCC";
 let mut results = Vec::new();
-let result = mini_search_with_positions(&transposed, target, 4, &mut results, None);
-println!("Result: {:?}", result); 
-// Result: [MatchInfo { query_idx: 1, cost: 1, pos: 5 }, MatchInfo { query_idx: 0, cost: 1, pos: 13 }, MatchInfo { query_idx: 0, cost: 0, pos: 14 }, MatchInfo { query_idx: 1, cost: 1, pos: 14 }, MatchInfo { query_idx: 0, cost: 1, pos: 15 }]
+mini_search_with_positions(&transposed, target, 1, None, &mut results);
+println!("Result: {:?}", results);
+// Result: [MatchInfo { query_idx: 1, cost: 1, pos: 5 } ...
 ```
 This returns *all* positions, which is not ideal perhaps, sassy returns the local minima position.
 
