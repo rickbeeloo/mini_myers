@@ -363,6 +363,63 @@ fn build_peqs_vectors(
     peqs
 }
 
+#[derive(Copy, Clone)]
+struct OverhangColumnCtx {
+    all_ones: i32x8,
+    zero_v: i32x8,
+    one_v: i32x8,
+    mask_vec: i32x8,
+    scale_shift: u32,
+}
+
+#[inline(always)]
+fn apply_overhang_column(
+    eq: i32x8,
+    adjust_vec: i32x8,
+    pv: &mut i32x8,
+    mv: &mut i32x8,
+    score: &mut i32x8,
+    ctx: OverhangColumnCtx,
+) -> i32x8 {
+    let all_ones = ctx.all_ones;
+    let zero_v = ctx.zero_v;
+    let one_v = ctx.one_v;
+    let mask_vec = ctx.mask_vec;
+
+    let pv_val = *pv;
+    let mv_val = *mv;
+    let xv = eq | mv_val;
+    let xh = (((eq & pv_val) + pv_val) ^ pv_val) | eq;
+    let ph = mv_val | (all_ones ^ (xh | pv_val));
+    let mh = pv_val & xh;
+
+    #[cfg(not(feature = "latest_wide"))]
+    let ph_bit_mask = (ph & mask_vec).cmp_eq(zero_v);
+    #[cfg(feature = "latest_wide")]
+    let ph_bit_mask = (ph & mask_vec).simd_eq(zero_v);
+
+    let ph_bit = (all_ones ^ ph_bit_mask) & one_v;
+
+    #[cfg(not(feature = "latest_wide"))]
+    let mh_bit_mask = (mh & mask_vec).cmp_eq(zero_v);
+    #[cfg(feature = "latest_wide")]
+    let mh_bit_mask = (mh & mask_vec).simd_eq(zero_v);
+
+    let mh_bit = (all_ones ^ mh_bit_mask) & one_v;
+    let ph_shift = ph << 1;
+    let new_pv = (mh << 1) | (all_ones ^ (xv | ph_shift));
+    let new_mv = ph_shift & xv;
+
+    *pv = new_pv;
+    *mv = new_mv;
+
+    let new_score = *score + (ph_bit - mh_bit);
+    *score = new_score;
+
+    let new_score_scaled = new_score << ctx.scale_shift;
+    new_score_scaled - adjust_vec
+}
+
 #[inline(always)]
 fn search_simd(transposed: &TQueries, target: &[u8], k: u8) -> Vec<i32> {
     // todo: would be nice to also extract this to transposedQueries so we only
@@ -468,6 +525,7 @@ fn search_simd_with_overhang(transposed: &TQueries, target: &[u8], k: u8, alpha:
     let all_ones = i32x8::splat(!0);
     let zero_v = i32x8::splat(0);
     let one_v = i32x8::splat(1);
+    let zero_eq_vec = i32x8::splat(0);
 
     let mut pv_vec: Vec<i32x8> = vec![all_ones; vectors_in_block];
     let mut mv_vec: Vec<i32x8> = vec![zero_v; vectors_in_block];
@@ -479,58 +537,56 @@ fn search_simd_with_overhang(transposed: &TQueries, target: &[u8], k: u8, alpha:
     let high_bit: u32 = 1u32 << (m - 1);
     let mask_vec = i32x8::splat(high_bit as i32);
     let k_scaled_vec = i32x8::splat(k_scaled);
+    let ctx = OverhangColumnCtx {
+        all_ones,
+        zero_v,
+        one_v,
+        mask_vec,
+        scale_shift: SCALE_SHIFT,
+    };
 
-    for (pos_counter, &tb) in target.iter().enumerate() {
+    for (idx, &tb) in target.iter().enumerate() {
         let encoded = get_encoded(tb);
         if encoded == INVALID_IUPAC {
             panic!("Target contains invalid IUPAC character: {:?}", tb as char);
         }
+        let overhang = m.saturating_sub(idx + 1) as i32;
+        let adjust_vec = i32x8::splat(overhang * extra_penalty_scaled);
         let peq_slice = unsafe { transposed.peqs.get_unchecked(encoded as usize) };
-        let overhang = m.saturating_sub(pos_counter + 1) as i32;
-        let overhang_adjust = overhang * extra_penalty_scaled;
-        let overhang_adjust_vec = i32x8::splat(overhang_adjust);
 
         for v in 0..vectors_in_block {
             let eq = unsafe { *peq_slice.get_unchecked(v) };
-            let pv = pv_vec[v];
-            let mv = mv_vec[v];
-            let xv = eq | mv;
-            let xh = (((eq & pv) + pv) ^ pv) | eq;
-            let ph = mv | (all_ones ^ (xh | pv));
-            let mh = pv & xh;
-
-            #[cfg(not(feature = "latest_wide"))]
-            let ph_bit_mask = (ph & mask_vec).cmp_eq(zero_v);
-            #[cfg(feature = "latest_wide")]
-            let ph_bit_mask = (ph & mask_vec).simd_eq(zero_v);
-
-            let ph_bit = (all_ones ^ ph_bit_mask) & one_v;
-
-            #[cfg(not(feature = "latest_wide"))]
-            let mh_bit_mask = (mh & mask_vec).cmp_eq(zero_v);
-            #[cfg(feature = "latest_wide")]
-            let mh_bit_mask = (mh & mask_vec).simd_eq(zero_v);
-
-            let mh_bit = (all_ones ^ mh_bit_mask) & one_v;
-            let ph_shift = ph << 1;
-            let new_pv = (mh << 1) | (all_ones ^ (xv | ph_shift));
-            let new_mv = ph_shift & xv;
-
-            unsafe {
-                *pv_vec.get_unchecked_mut(v) = new_pv;
-                *mv_vec.get_unchecked_mut(v) = new_mv;
-            }
-
-            let new_score = unsafe { *scores_vec.get_unchecked(v) } + (ph_bit - mh_bit);
-            unsafe {
-                *scores_vec.get_unchecked_mut(v) = new_score;
-            }
-
-            let new_score_scaled = new_score << SCALE_SHIFT;
-            let adjusted = new_score_scaled - overhang_adjust_vec;
+            let adjusted = apply_overhang_column(
+                eq,
+                adjust_vec,
+                unsafe { pv_vec.get_unchecked_mut(v) },
+                unsafe { mv_vec.get_unchecked_mut(v) },
+                unsafe { scores_vec.get_unchecked_mut(v) },
+                ctx,
+            );
             unsafe {
                 let current_min = *min_adjusted_vec.get_unchecked(v);
                 *min_adjusted_vec.get_unchecked_mut(v) = current_min.min(adjusted);
+            }
+        }
+    }
+
+    if alpha_scaled < SCALE {
+        for trailing in 1..=m {
+            let adjust_vec = i32x8::splat((trailing as i32) * extra_penalty_scaled);
+            for v in 0..vectors_in_block {
+                let adjusted = apply_overhang_column(
+                    zero_eq_vec,
+                    adjust_vec,
+                    unsafe { pv_vec.get_unchecked_mut(v) },
+                    unsafe { mv_vec.get_unchecked_mut(v) },
+                    unsafe { scores_vec.get_unchecked_mut(v) },
+                    ctx,
+                );
+                unsafe {
+                    let current_min = *min_adjusted_vec.get_unchecked(v);
+                    *min_adjusted_vec.get_unchecked_mut(v) = current_min.min(adjusted);
+                }
             }
         }
     }
@@ -689,55 +745,35 @@ fn search_simd_with_positions_overhang(
 
     let high_bit: u32 = 1u32 << (m - 1);
     let mask_vec = i32x8::splat(high_bit as i32);
+    let zero_eq_vec = i32x8::splat(0);
+    let ctx = OverhangColumnCtx {
+        all_ones,
+        zero_v,
+        one_v,
+        mask_vec,
+        scale_shift: SCALE_SHIFT,
+    };
 
-    for (pos_counter, &tb) in target.iter().enumerate() {
+    for (idx, &tb) in target.iter().enumerate() {
         let encoded = get_encoded(tb);
         if encoded == INVALID_IUPAC {
             panic!("Target contains invalid IUPAC character: {:?}", tb as char);
         }
+        let overhang = m.saturating_sub(idx + 1) as i32;
+        let adjust_vec = i32x8::splat(overhang * extra_penalty_scaled);
         let peq_slice = unsafe { transposed.peqs.get_unchecked(encoded as usize) };
-        let overhang = m.saturating_sub(pos_counter + 1) as i32;
-        let overhang_adjust = overhang * extra_penalty_scaled;
-        let overhang_adjust_vec = i32x8::splat(overhang_adjust);
+        let pos = idx as i32;
 
         for v in 0..vectors_in_block {
             let eq = unsafe { *peq_slice.get_unchecked(v) };
-            let pv = pv_vec[v];
-            let mv = mv_vec[v];
-            let xv = eq | mv;
-            let xh = (((eq & pv) + pv) ^ pv) | eq;
-            let ph = mv | (all_ones ^ (xh | pv));
-            let mh = pv & xh;
-
-            #[cfg(not(feature = "latest_wide"))]
-            let ph_bit_mask = (ph & mask_vec).cmp_eq(zero_v);
-            #[cfg(feature = "latest_wide")]
-            let ph_bit_mask = (ph & mask_vec).simd_eq(zero_v);
-
-            let ph_bit = (all_ones ^ ph_bit_mask) & one_v;
-
-            #[cfg(not(feature = "latest_wide"))]
-            let mh_bit_mask = (mh & mask_vec).cmp_eq(zero_v);
-            #[cfg(feature = "latest_wide")]
-            let mh_bit_mask = (mh & mask_vec).simd_eq(zero_v);
-
-            let mh_bit = (all_ones ^ mh_bit_mask) & one_v;
-            let ph_shift = ph << 1;
-            let new_pv = (mh << 1) | (all_ones ^ (xv | ph_shift));
-            let new_mv = ph_shift & xv;
-
-            unsafe {
-                *pv_vec.get_unchecked_mut(v) = new_pv;
-                *mv_vec.get_unchecked_mut(v) = new_mv;
-            }
-
-            let new_score = unsafe { *scores_vec.get_unchecked(v) } + (ph_bit - mh_bit);
-            unsafe {
-                *scores_vec.get_unchecked_mut(v) = new_score;
-            }
-
-            let new_score_scaled = new_score << SCALE_SHIFT;
-            let adjusted = new_score_scaled - overhang_adjust_vec;
+            let adjusted = apply_overhang_column(
+                eq,
+                adjust_vec,
+                unsafe { pv_vec.get_unchecked_mut(v) },
+                unsafe { mv_vec.get_unchecked_mut(v) },
+                unsafe { scores_vec.get_unchecked_mut(v) },
+                ctx,
+            );
 
             #[cfg(not(feature = "latest_wide"))]
             let match_mask = all_ones ^ adjusted.cmp_gt(k_scaled_vec);
@@ -745,9 +781,7 @@ fn search_simd_with_positions_overhang(
             let match_mask = all_ones ^ adjusted.simd_gt(k_scaled_vec);
 
             let match_bits = unsafe { std::mem::transmute::<i32x8, [i32; 8]>(match_mask) };
-            let has_matches = match_bits.iter().any(|&b| b != 0);
-
-            if has_matches {
+            if match_bits.iter().any(|&b| b != 0) {
                 let adjusted_arr = adjusted.to_array();
                 let base = v * SIMD_LANES;
                 let end = (base + SIMD_LANES).min(nq);
@@ -757,8 +791,48 @@ fn search_simd_with_positions_overhang(
                         results.push(MatchInfoOverhang {
                             query_idx: base + i,
                             cost: score_scaled as f32 * inv_scale,
-                            pos: pos_counter as i32,
+                            pos,
                         });
+                    }
+                }
+            }
+        }
+    }
+
+    if alpha_scaled < SCALE {
+        for trailing in 1..=m {
+            let adjust_vec = i32x8::splat((trailing as i32) * extra_penalty_scaled);
+            let pos = (target.len() + trailing - 1) as i32;
+
+            for v in 0..vectors_in_block {
+                let adjusted = apply_overhang_column(
+                    zero_eq_vec,
+                    adjust_vec,
+                    unsafe { pv_vec.get_unchecked_mut(v) },
+                    unsafe { mv_vec.get_unchecked_mut(v) },
+                    unsafe { scores_vec.get_unchecked_mut(v) },
+                    ctx,
+                );
+
+                #[cfg(not(feature = "latest_wide"))]
+                let match_mask = all_ones ^ adjusted.cmp_gt(k_scaled_vec);
+                #[cfg(feature = "latest_wide")]
+                let match_mask = all_ones ^ adjusted.simd_gt(k_scaled_vec);
+
+                let match_bits = unsafe { std::mem::transmute::<i32x8, [i32; 8]>(match_mask) };
+                if match_bits.iter().any(|&b| b != 0) {
+                    let adjusted_arr = adjusted.to_array();
+                    let base = v * SIMD_LANES;
+                    let end = (base + SIMD_LANES).min(nq);
+
+                    for (i, &score_scaled) in adjusted_arr[..(end - base)].iter().enumerate() {
+                        if score_scaled <= k_scaled {
+                            results.push(MatchInfoOverhang {
+                                query_idx: base + i,
+                                cost: score_scaled as f32 * inv_scale,
+                                pos,
+                            });
+                        }
                     }
                 }
             }
@@ -1055,19 +1129,50 @@ mod tests {
         let t = b"A";
         let mut results = Vec::new();
         mini_search_with_positions_overhang(&transposed, t, 1, 0.5, &mut results);
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].query_idx, 0);
-        assert_eq!(results[0].pos, 0);
-        assert!((results[0].cost - 0.5).abs() < 1e-6);
+        assert!(!results.is_empty());
+        let min_cost_entry = results
+            .iter()
+            .min_by(|a, b| a.cost.partial_cmp(&b.cost).unwrap())
+            .unwrap();
+        assert_eq!(min_cost_entry.query_idx, 0);
+        assert!((min_cost_entry.cost - 0.5).abs() < 1e-6);
     }
 
     #[test]
-    fn test_longer_overhang() {
+    fn test_longer_overhang_left() {
         let queries = vec![b"AAACCC".to_vec()];
         let transposed = TQueries::new(&queries);
         let t = b"CCCGGGGGGGG";
         let mut results = Vec::new();
         mini_search_with_positions_overhang(&transposed, t, 4, 0.5, &mut results);
-        println!("Results: {:?}", results);
+        // Get minimum cost match
+        let min_cost = results
+            .iter()
+            .map(|m| m.cost)
+            .fold(f32::INFINITY, |a, b| a.min(b));
+        assert!(
+            (min_cost - 1.5).abs() < 1e-6,
+            "expected 1.5, got {}",
+            min_cost
+        );
+    }
+
+    #[test]
+    fn test_longer_overhang_right() {
+        let queries = vec![b"AAACCC".to_vec()];
+        let transposed = TQueries::new(&queries);
+        let t = b"GGGGGAAA";
+        let mut results = Vec::new();
+        mini_search_with_positions_overhang(&transposed, t, 4, 0.5, &mut results);
+        // Get minimum cost match
+        let min_cost = results
+            .iter()
+            .map(|m| m.cost)
+            .fold(f32::INFINITY, |a, b| a.min(b));
+        assert!(
+            (min_cost - 1.5).abs() < 1e-6,
+            "expected 1.5, got {}",
+            min_cost
+        );
     }
 }
