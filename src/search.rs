@@ -123,13 +123,64 @@ struct OverhangColumnCtx {
     scale_shift: u32,
 }
 
+#[derive(Copy, Clone)]
+#[repr(C, align(32))]
+struct ColumnState {
+    pv: i32x8,
+    mv: i32x8,
+    score: i32x8,
+}
+
+impl ColumnState {
+    #[inline(always)]
+    fn new(initial_score: i32, all_ones: i32x8, zero_v: i32x8) -> Self {
+        Self {
+            pv: all_ones,
+            mv: zero_v,
+            score: i32x8::splat(initial_score),
+        }
+    }
+
+    #[inline(always)]
+    fn advance(&mut self, eq: i32x8, adjust_vec: i32x8, ctx: OverhangColumnCtx) -> i32x8 {
+        apply_overhang_column(self, eq, adjust_vec, ctx)
+    }
+}
+
+#[derive(Copy, Clone)]
+#[repr(C, align(32))]
+struct ColumnStateWithMin {
+    state: ColumnState,
+    best_adjusted: i32x8,
+}
+
+impl ColumnStateWithMin {
+    #[inline(always)]
+    fn new(initial_score: i32, initial_adjusted: i32, all_ones: i32x8, zero_v: i32x8) -> Self {
+        Self {
+            state: ColumnState::new(initial_score, all_ones, zero_v),
+            best_adjusted: i32x8::splat(initial_adjusted),
+        }
+    }
+
+    #[inline(always)]
+    fn advance(&mut self, eq: i32x8, adjust_vec: i32x8, ctx: OverhangColumnCtx) -> i32x8 {
+        let adjusted = apply_overhang_column(&mut self.state, eq, adjust_vec, ctx);
+        self.best_adjusted = self.best_adjusted.min(adjusted);
+        adjusted
+    }
+
+    #[inline(always)]
+    fn best_adjusted(&self) -> i32x8 {
+        self.best_adjusted
+    }
+}
+
 #[inline(always)]
 fn apply_overhang_column(
+    state: &mut ColumnState,
     eq: i32x8,
     adjust_vec: i32x8,
-    pv: &mut i32x8,
-    mv: &mut i32x8,
-    score: &mut i32x8,
     ctx: OverhangColumnCtx,
 ) -> i32x8 {
     let all_ones = ctx.all_ones;
@@ -137,8 +188,8 @@ fn apply_overhang_column(
     let one_v = ctx.one_v;
     let mask_vec = ctx.mask_vec;
 
-    let pv_val = *pv;
-    let mv_val = *mv;
+    let pv_val = state.pv;
+    let mv_val = state.mv;
     let xv = eq | mv_val;
     let xh = (((eq & pv_val) + pv_val) ^ pv_val) | eq;
     let ph = mv_val | (all_ones ^ (xh | pv_val));
@@ -161,11 +212,11 @@ fn apply_overhang_column(
     let new_pv = (mh << 1) | (all_ones ^ (xv | ph_shift));
     let new_mv = ph_shift & xv;
 
-    *pv = new_pv;
-    *mv = new_mv;
+    state.pv = new_pv;
+    state.mv = new_mv;
 
-    let new_score = *score + (ph_bit - mh_bit);
-    *score = new_score;
+    let new_score = state.score + (ph_bit - mh_bit);
+    state.score = new_score;
 
     let new_score_scaled = new_score << ctx.scale_shift;
     new_score_scaled - adjust_vec
@@ -174,8 +225,13 @@ fn apply_overhang_column(
 /// Core SIMD Myers search optionally applying an overhang penalty `alpha`.
 /// `alpha` should be in the range `[0.0, 1.0]`, where `1.0` corresponds to the
 /// standard Myers edit distance and lower values discount overhangs.
-#[inline(always)]
-fn search_simd_core(transposed: &TQueries, target: &[u8], k: u8, alpha: f32) -> Vec<f32> {
+#[inline(never)]
+pub(crate) fn search_simd_core(
+    transposed: &TQueries,
+    target: &[u8],
+    k: u8,
+    alpha: f32,
+) -> Vec<f32> {
     const SCALE_SHIFT: u32 = 8;
     const SCALE: i32 = 1 << SCALE_SHIFT; // 256
 
@@ -193,12 +249,12 @@ fn search_simd_core(transposed: &TQueries, target: &[u8], k: u8, alpha: f32) -> 
     let one_v = i32x8::splat(1);
     let zero_eq_vec = i32x8::splat(0);
 
-    let mut pv_vec: Vec<i32x8> = vec![all_ones; vectors_in_block];
-    let mut mv_vec: Vec<i32x8> = vec![zero_v; vectors_in_block];
-    let mut scores_vec: Vec<i32x8> = vec![i32x8::splat(m as i32); vectors_in_block];
-
     let initial_adjusted = (m as i32) * alpha_scaled;
-    let mut min_adjusted_vec: Vec<i32x8> = vec![i32x8::splat(initial_adjusted); vectors_in_block];
+    let mut states: Vec<ColumnStateWithMin> =
+        vec![
+            ColumnStateWithMin::new(m as i32, initial_adjusted, all_ones, zero_v);
+            vectors_in_block
+        ];
 
     let high_bit: u32 = 1u32 << (m - 1);
     let mask_vec = i32x8::splat(high_bit as i32);
@@ -222,17 +278,8 @@ fn search_simd_core(transposed: &TQueries, target: &[u8], k: u8, alpha: f32) -> 
 
         for v in 0..vectors_in_block {
             let eq = unsafe { *peq_slice.get_unchecked(v) };
-            let adjusted = apply_overhang_column(
-                eq,
-                adjust_vec,
-                unsafe { pv_vec.get_unchecked_mut(v) },
-                unsafe { mv_vec.get_unchecked_mut(v) },
-                unsafe { scores_vec.get_unchecked_mut(v) },
-                ctx,
-            );
             unsafe {
-                let current_min = *min_adjusted_vec.get_unchecked(v);
-                *min_adjusted_vec.get_unchecked_mut(v) = current_min.min(adjusted);
+                states.get_unchecked_mut(v).advance(eq, adjust_vec, ctx);
             }
         }
     }
@@ -241,17 +288,10 @@ fn search_simd_core(transposed: &TQueries, target: &[u8], k: u8, alpha: f32) -> 
         for trailing in 1..=m {
             let adjust_vec = i32x8::splat((trailing as i32) * extra_penalty_scaled);
             for v in 0..vectors_in_block {
-                let adjusted = apply_overhang_column(
-                    zero_eq_vec,
-                    adjust_vec,
-                    unsafe { pv_vec.get_unchecked_mut(v) },
-                    unsafe { mv_vec.get_unchecked_mut(v) },
-                    unsafe { scores_vec.get_unchecked_mut(v) },
-                    ctx,
-                );
                 unsafe {
-                    let current_min = *min_adjusted_vec.get_unchecked(v);
-                    *min_adjusted_vec.get_unchecked_mut(v) = current_min.min(adjusted);
+                    states
+                        .get_unchecked_mut(v)
+                        .advance(zero_eq_vec, adjust_vec, ctx);
                 }
             }
         }
@@ -260,8 +300,8 @@ fn search_simd_core(transposed: &TQueries, target: &[u8], k: u8, alpha: f32) -> 
     let mut result = vec![-1.0f32; nq];
     let neg_mask = i32x8::splat(i32::MAX);
 
-    for v in 0..vectors_in_block {
-        let min_adj = unsafe { *min_adjusted_vec.get_unchecked(v) };
+    for (v, state) in states.iter().enumerate() {
+        let min_adj = state.best_adjusted();
 
         #[cfg(not(feature = "latest_wide"))]
         let mask = all_ones ^ min_adj.cmp_gt(k_scaled_vec);
@@ -309,9 +349,8 @@ fn search_simd_with_positions_core(
     let k_scaled_vec = i32x8::splat(k_scaled);
     let inv_scale = 1.0f32 / (SCALE as f32);
 
-    let mut pv_vec: Vec<i32x8> = vec![all_ones; vectors_in_block];
-    let mut mv_vec: Vec<i32x8> = vec![zero_v; vectors_in_block];
-    let mut scores_vec: Vec<i32x8> = vec![i32x8::splat(m as i32); vectors_in_block];
+    let mut states: Vec<ColumnState> =
+        vec![ColumnState::new(m as i32, all_ones, zero_v); vectors_in_block];
 
     let high_bit: u32 = 1u32 << (m - 1);
     let mask_vec = i32x8::splat(high_bit as i32);
@@ -336,14 +375,7 @@ fn search_simd_with_positions_core(
 
         for v in 0..vectors_in_block {
             let eq = unsafe { *peq_slice.get_unchecked(v) };
-            let adjusted = apply_overhang_column(
-                eq,
-                adjust_vec,
-                unsafe { pv_vec.get_unchecked_mut(v) },
-                unsafe { mv_vec.get_unchecked_mut(v) },
-                unsafe { scores_vec.get_unchecked_mut(v) },
-                ctx,
-            );
+            let adjusted = unsafe { states.get_unchecked_mut(v).advance(eq, adjust_vec, ctx) };
 
             #[cfg(not(feature = "latest_wide"))]
             let match_mask = all_ones ^ adjusted.cmp_gt(k_scaled_vec);
@@ -375,14 +407,11 @@ fn search_simd_with_positions_core(
             let pos = (target.len() + trailing - 1) as i32;
 
             for v in 0..vectors_in_block {
-                let adjusted = apply_overhang_column(
-                    zero_eq_vec,
-                    adjust_vec,
-                    unsafe { pv_vec.get_unchecked_mut(v) },
-                    unsafe { mv_vec.get_unchecked_mut(v) },
-                    unsafe { scores_vec.get_unchecked_mut(v) },
-                    ctx,
-                );
+                let adjusted = unsafe {
+                    states
+                        .get_unchecked_mut(v)
+                        .advance(zero_eq_vec, adjust_vec, ctx)
+                };
 
                 #[cfg(not(feature = "latest_wide"))]
                 let match_mask = all_ones ^ adjusted.cmp_gt(k_scaled_vec);
