@@ -169,6 +169,17 @@ pub struct MatchInfo {
     pub pos: i32,
 }
 
+/// Match information including position and fractional cost when using overhang penalties.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MatchInfoOverhang {
+    /// Index of the query (0-based)
+    pub query_idx: usize,
+    /// Minimum edit distance found with overhang penalty alpha applied
+    pub cost: f32,
+    /// Position in target where best match ends (0-based)
+    pub pos: i32,
+}
+
 /// Searches for all queries in the target sequence using the Myers algorithm.
 /// Returning the minimum edits found for the query in the entire target, or
 /// `-1` if below the provided maximum edit distance `k`.
@@ -264,6 +275,64 @@ pub fn mini_search_with_positions(
     let m = transposed.query_length;
     assert!(m > 0 && m <= 32, "query length must be 1..=32");
     search_simd_with_positions(transposed, target, k, results)
+}
+
+/// Searches for all queries using an overhang penalty `alpha` at the text boundaries.
+///
+/// Overhangs represent query characters that fall outside the target boundaries. They incur
+/// a reduced cost of `alpha` per character (default `alpha = 1.0` restores the standard behaviour).
+/// Returns the minimum edit distance for each query as a floating point value. A result of `-1.0`
+/// indicates no match was found within the provided `k` threshold.
+#[inline(always)]
+pub fn mini_search_with_overhang(
+    transposed: &TQueries,
+    target: &[u8],
+    k: u8,
+    alpha: f32,
+) -> Vec<f32> {
+    let nq = transposed.n_queries;
+    if nq == 0 {
+        return Vec::new();
+    }
+    let m = transposed.query_length;
+    assert!(m > 0 && m <= 32, "query length must be 1..=32");
+    let alpha = alpha.clamp(0.0, 1.0);
+    if alpha >= 0.999_999 {
+        return search_simd(transposed, target, k)
+            .into_iter()
+            .map(|v| v as f32)
+            .collect();
+    }
+    search_simd_with_overhang(transposed, target, k, alpha)
+}
+
+/// Searches for all queries using an overhang penalty `alpha`, returning all matches with positions.
+#[inline(always)]
+pub fn mini_search_with_positions_overhang(
+    transposed: &TQueries,
+    target: &[u8],
+    k: u8,
+    alpha: f32,
+    results: &mut Vec<MatchInfoOverhang>,
+) {
+    let nq = transposed.n_queries;
+    if nq == 0 {
+        return;
+    }
+    let m = transposed.query_length;
+    assert!(m > 0 && m <= 32, "query length must be 1..=32");
+    let alpha = alpha.clamp(0.0, 1.0);
+    if alpha >= 0.999_999 {
+        let mut tmp = Vec::new();
+        search_simd_with_positions(transposed, target, k, &mut tmp);
+        results.extend(tmp.into_iter().map(|info| MatchInfoOverhang {
+            query_idx: info.query_idx,
+            cost: info.cost as f32,
+            pos: info.pos,
+        }));
+        return;
+    }
+    search_simd_with_positions_overhang(transposed, target, k, alpha, results)
 }
 
 /// Build peqs vectors from precomputed masks.
@@ -382,6 +451,114 @@ fn search_simd(transposed: &TQueries, target: &[u8], k: u8) -> Vec<i32> {
     result
 }
 
+#[inline(always)]
+fn search_simd_with_overhang(transposed: &TQueries, target: &[u8], k: u8, alpha: f32) -> Vec<f32> {
+    const SCALE_SHIFT: u32 = 8;
+    const SCALE: i32 = 1 << SCALE_SHIFT; // 256
+
+    let nq = transposed.n_queries;
+    let m = transposed.query_length;
+    let vectors_in_block = nq.div_ceil(SIMD_LANES);
+
+    let alpha_scaled = ((alpha * (SCALE as f32)).round() as i32).clamp(0, SCALE);
+    let extra_penalty_scaled = SCALE - alpha_scaled;
+    let k_scaled = (k as i32) << SCALE_SHIFT;
+    let inv_scale = 1.0f32 / (SCALE as f32);
+
+    let all_ones = i32x8::splat(!0);
+    let zero_v = i32x8::splat(0);
+    let one_v = i32x8::splat(1);
+
+    let mut pv_vec: Vec<i32x8> = vec![all_ones; vectors_in_block];
+    let mut mv_vec: Vec<i32x8> = vec![zero_v; vectors_in_block];
+    let mut scores_vec: Vec<i32x8> = vec![i32x8::splat(m as i32); vectors_in_block];
+
+    let initial_adjusted = (m as i32) * alpha_scaled;
+    let mut min_adjusted_vec: Vec<i32x8> = vec![i32x8::splat(initial_adjusted); vectors_in_block];
+
+    let high_bit: u32 = 1u32 << (m - 1);
+    let mask_vec = i32x8::splat(high_bit as i32);
+    let k_scaled_vec = i32x8::splat(k_scaled);
+
+    for (pos_counter, &tb) in target.iter().enumerate() {
+        let encoded = get_encoded(tb);
+        if encoded == INVALID_IUPAC {
+            panic!("Target contains invalid IUPAC character: {:?}", tb as char);
+        }
+        let peq_slice = unsafe { transposed.peqs.get_unchecked(encoded as usize) };
+        let overhang = m.saturating_sub(pos_counter + 1) as i32;
+        let overhang_adjust = overhang * extra_penalty_scaled;
+        let overhang_adjust_vec = i32x8::splat(overhang_adjust);
+
+        for v in 0..vectors_in_block {
+            let eq = unsafe { *peq_slice.get_unchecked(v) };
+            let pv = pv_vec[v];
+            let mv = mv_vec[v];
+            let xv = eq | mv;
+            let xh = (((eq & pv) + pv) ^ pv) | eq;
+            let ph = mv | (all_ones ^ (xh | pv));
+            let mh = pv & xh;
+
+            #[cfg(not(feature = "latest_wide"))]
+            let ph_bit_mask = (ph & mask_vec).cmp_eq(zero_v);
+            #[cfg(feature = "latest_wide")]
+            let ph_bit_mask = (ph & mask_vec).simd_eq(zero_v);
+
+            let ph_bit = (all_ones ^ ph_bit_mask) & one_v;
+
+            #[cfg(not(feature = "latest_wide"))]
+            let mh_bit_mask = (mh & mask_vec).cmp_eq(zero_v);
+            #[cfg(feature = "latest_wide")]
+            let mh_bit_mask = (mh & mask_vec).simd_eq(zero_v);
+
+            let mh_bit = (all_ones ^ mh_bit_mask) & one_v;
+            let ph_shift = ph << 1;
+            let new_pv = (mh << 1) | (all_ones ^ (xv | ph_shift));
+            let new_mv = ph_shift & xv;
+
+            unsafe {
+                *pv_vec.get_unchecked_mut(v) = new_pv;
+                *mv_vec.get_unchecked_mut(v) = new_mv;
+            }
+
+            let new_score = unsafe { *scores_vec.get_unchecked(v) } + (ph_bit - mh_bit);
+            unsafe {
+                *scores_vec.get_unchecked_mut(v) = new_score;
+            }
+
+            let new_score_scaled = new_score << SCALE_SHIFT;
+            let adjusted = new_score_scaled - overhang_adjust_vec;
+            unsafe {
+                let current_min = *min_adjusted_vec.get_unchecked(v);
+                *min_adjusted_vec.get_unchecked_mut(v) = current_min.min(adjusted);
+            }
+        }
+    }
+
+    let mut result = vec![-1.0f32; nq];
+    let neg_mask = i32x8::splat(i32::MAX);
+
+    for v in 0..vectors_in_block {
+        let min_adj = unsafe { *min_adjusted_vec.get_unchecked(v) };
+
+        #[cfg(not(feature = "latest_wide"))]
+        let mask = all_ones ^ min_adj.cmp_gt(k_scaled_vec);
+        #[cfg(feature = "latest_wide")]
+        let mask = all_ones ^ min_adj.simd_gt(k_scaled_vec);
+
+        let selected = mask.blend(min_adj, neg_mask);
+        let base = v * SIMD_LANES;
+        let end = (base + SIMD_LANES).min(nq);
+        let selected_arr = selected.to_array();
+        for (lane_idx, &val) in selected_arr[..(end - base)].iter().enumerate() {
+            if val != i32::MAX {
+                result[base + lane_idx] = (val as f32) * inv_scale;
+            }
+        }
+    }
+    result
+}
+
 /// SIMD search with position tracking - optimized for minimal overhead.
 /// Tracks ALL positions where score <= k by incrementally collecting matches.
 #[inline(always)]
@@ -472,6 +649,114 @@ fn search_simd_with_positions(
                         results.push(MatchInfo {
                             query_idx: base + i,
                             cost: score,
+                            pos: pos_counter as i32,
+                        });
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[inline(always)]
+fn search_simd_with_positions_overhang(
+    transposed: &TQueries,
+    target: &[u8],
+    k: u8,
+    alpha: f32,
+    results: &mut Vec<MatchInfoOverhang>,
+) {
+    const SCALE_SHIFT: u32 = 8;
+    const SCALE: i32 = 1 << SCALE_SHIFT;
+
+    let all_ones = i32x8::splat(!0);
+    let zero_v = i32x8::splat(0);
+    let one_v = i32x8::splat(1);
+
+    let nq = transposed.n_queries;
+    let m = transposed.query_length;
+    let vectors_in_block = nq.div_ceil(SIMD_LANES);
+
+    let alpha_scaled = ((alpha * (SCALE as f32)).round() as i32).clamp(0, SCALE);
+    let extra_penalty_scaled = SCALE - alpha_scaled;
+    let k_scaled = (k as i32) << SCALE_SHIFT;
+    let k_scaled_vec = i32x8::splat(k_scaled);
+    let inv_scale = 1.0f32 / (SCALE as f32);
+
+    let mut pv_vec: Vec<i32x8> = vec![all_ones; vectors_in_block];
+    let mut mv_vec: Vec<i32x8> = vec![zero_v; vectors_in_block];
+    let mut scores_vec: Vec<i32x8> = vec![i32x8::splat(m as i32); vectors_in_block];
+
+    let high_bit: u32 = 1u32 << (m - 1);
+    let mask_vec = i32x8::splat(high_bit as i32);
+
+    for (pos_counter, &tb) in target.iter().enumerate() {
+        let encoded = get_encoded(tb);
+        if encoded == INVALID_IUPAC {
+            panic!("Target contains invalid IUPAC character: {:?}", tb as char);
+        }
+        let peq_slice = unsafe { transposed.peqs.get_unchecked(encoded as usize) };
+        let overhang = m.saturating_sub(pos_counter + 1) as i32;
+        let overhang_adjust = overhang * extra_penalty_scaled;
+        let overhang_adjust_vec = i32x8::splat(overhang_adjust);
+
+        for v in 0..vectors_in_block {
+            let eq = unsafe { *peq_slice.get_unchecked(v) };
+            let pv = pv_vec[v];
+            let mv = mv_vec[v];
+            let xv = eq | mv;
+            let xh = (((eq & pv) + pv) ^ pv) | eq;
+            let ph = mv | (all_ones ^ (xh | pv));
+            let mh = pv & xh;
+
+            #[cfg(not(feature = "latest_wide"))]
+            let ph_bit_mask = (ph & mask_vec).cmp_eq(zero_v);
+            #[cfg(feature = "latest_wide")]
+            let ph_bit_mask = (ph & mask_vec).simd_eq(zero_v);
+
+            let ph_bit = (all_ones ^ ph_bit_mask) & one_v;
+
+            #[cfg(not(feature = "latest_wide"))]
+            let mh_bit_mask = (mh & mask_vec).cmp_eq(zero_v);
+            #[cfg(feature = "latest_wide")]
+            let mh_bit_mask = (mh & mask_vec).simd_eq(zero_v);
+
+            let mh_bit = (all_ones ^ mh_bit_mask) & one_v;
+            let ph_shift = ph << 1;
+            let new_pv = (mh << 1) | (all_ones ^ (xv | ph_shift));
+            let new_mv = ph_shift & xv;
+
+            unsafe {
+                *pv_vec.get_unchecked_mut(v) = new_pv;
+                *mv_vec.get_unchecked_mut(v) = new_mv;
+            }
+
+            let new_score = unsafe { *scores_vec.get_unchecked(v) } + (ph_bit - mh_bit);
+            unsafe {
+                *scores_vec.get_unchecked_mut(v) = new_score;
+            }
+
+            let new_score_scaled = new_score << SCALE_SHIFT;
+            let adjusted = new_score_scaled - overhang_adjust_vec;
+
+            #[cfg(not(feature = "latest_wide"))]
+            let match_mask = all_ones ^ adjusted.cmp_gt(k_scaled_vec);
+            #[cfg(feature = "latest_wide")]
+            let match_mask = all_ones ^ adjusted.simd_gt(k_scaled_vec);
+
+            let match_bits = unsafe { std::mem::transmute::<i32x8, [i32; 8]>(match_mask) };
+            let has_matches = match_bits.iter().any(|&b| b != 0);
+
+            if has_matches {
+                let adjusted_arr = adjusted.to_array();
+                let base = v * SIMD_LANES;
+                let end = (base + SIMD_LANES).min(nq);
+
+                for (i, &score_scaled) in adjusted_arr[..(end - base)].iter().enumerate() {
+                    if score_scaled <= k_scaled {
+                        results.push(MatchInfoOverhang {
+                            query_idx: base + i,
+                            cost: score_scaled as f32 * inv_scale,
                             pos: pos_counter as i32,
                         });
                     }
@@ -686,7 +971,7 @@ mod tests {
         // mini_search returns minimum cost per query
         // mini_search_with_positions returns all matches
         // Check that the minimum cost in positions matches mini_search result
-        for query_idx in 0..queries.len() {
+        for (query_idx, _) in queries.iter().enumerate() {
             let min_cost_in_positions = result_pos
                 .iter()
                 .filter(|m| m.query_idx == query_idx)
@@ -735,5 +1020,54 @@ mod tests {
                 assert!(m.pos >= 0);
             }
         }
+    }
+    #[test]
+    fn test_overhang_half_penalty() {
+        let queries = vec![b"AC".to_vec()];
+        let transposed = TQueries::new(&queries);
+        let t = b"A";
+        let result = mini_search_with_overhang(&transposed, t, 1, 0.5);
+        assert_eq!(result.len(), 1);
+        assert!(
+            (result[0] - 0.5).abs() < 1e-6,
+            "expected 0.5, got {}",
+            result[0]
+        );
+    }
+
+    #[test]
+    fn test_overhang_matches_standard_when_alpha_one() {
+        let queries = vec![b"ATG".to_vec()];
+        let transposed = TQueries::new(&queries);
+        let t = b"CCCCCCCCCATGCCCCC";
+        let standard = mini_search(&transposed, t, 4);
+        let overhang = mini_search_with_overhang(&transposed, t, 4, 1.0);
+        assert_eq!(standard.len(), overhang.len());
+        for (i, &val) in standard.iter().enumerate() {
+            assert!((overhang[i] - val as f32).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn test_positions_overhang() {
+        let queries = vec![b"AC".to_vec()];
+        let transposed = TQueries::new(&queries);
+        let t = b"A";
+        let mut results = Vec::new();
+        mini_search_with_positions_overhang(&transposed, t, 1, 0.5, &mut results);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].query_idx, 0);
+        assert_eq!(results[0].pos, 0);
+        assert!((results[0].cost - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_longer_overhang() {
+        let queries = vec![b"AAACCC".to_vec()];
+        let transposed = TQueries::new(&queries);
+        let t = b"CCCGGGGGGGG";
+        let mut results = Vec::new();
+        mini_search_with_positions_overhang(&transposed, t, 4, 0.5, &mut results);
+        println!("Results: {:?}", results);
     }
 }
