@@ -1,4 +1,5 @@
 use crate::constant::*;
+use std::mem::MaybeUninit;
 #[cfg(not(feature = "latest_wide"))]
 use wide_v07 as wide;
 #[cfg(feature = "latest_wide")]
@@ -250,11 +251,19 @@ pub(crate) fn search_simd_core(
     let zero_eq_vec = i32x8::splat(0);
 
     let initial_adjusted = (m as i32) * alpha_scaled;
-    let mut states: Vec<ColumnStateWithMin> =
-        vec![
-            ColumnStateWithMin::new(m as i32, initial_adjusted, all_ones, zero_v);
-            vectors_in_block
-        ];
+    let mut states: Vec<ColumnStateWithMin> = Vec::with_capacity(vectors_in_block);
+    unsafe {
+        let ptr = states.as_mut_ptr() as *mut MaybeUninit<ColumnStateWithMin>;
+        for i in 0..vectors_in_block {
+            ptr.add(i).write(MaybeUninit::new(ColumnStateWithMin::new(
+                m as i32,
+                initial_adjusted,
+                all_ones,
+                zero_v,
+            )));
+        }
+        states.set_len(vectors_in_block);
+    }
 
     let high_bit: u32 = 1u32 << (m - 1);
     let mask_vec = i32x8::splat(high_bit as i32);
@@ -349,8 +358,16 @@ fn search_simd_with_positions_core(
     let k_scaled_vec = i32x8::splat(k_scaled);
     let inv_scale = 1.0f32 / (SCALE as f32);
 
-    let mut states: Vec<ColumnState> =
-        vec![ColumnState::new(m as i32, all_ones, zero_v); vectors_in_block];
+    let mut states: Vec<ColumnStateWithMin> = Vec::with_capacity(vectors_in_block);
+    unsafe {
+        let ptr = states.as_mut_ptr() as *mut MaybeUninit<ColumnState>;
+        for i in 0..vectors_in_block {
+            ptr.add(i).write(MaybeUninit::new(ColumnState::new(
+                m as i32, all_ones, zero_v,
+            )));
+        }
+        states.set_len(vectors_in_block);
+    }
 
     let high_bit: u32 = 1u32 << (m - 1);
     let mask_vec = i32x8::splat(high_bit as i32);

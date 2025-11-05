@@ -41,7 +41,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut rng = StdRng::seed_from_u64(42);
     let mut results = Vec::new();
 
-    let target_lens = vec![50_000];
+    let target_lens = vec![1_000];
     let query_lens = vec![24];
     let ks = vec![4];
     let iterations = 100;
