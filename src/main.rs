@@ -15,10 +15,16 @@ fn generate_random_dna(l: usize) -> Vec<u8> {
 }
 
 fn main() {
-    let queries = vec![b"ATG".to_vec(), b"TTG".to_vec()];
+    use std::hint::black_box;
+    let n_queries = 192;
+    let query_len = 24;
+    let mut queries = Vec::with_capacity(n_queries);
+    for _ in 0..n_queries {
+        queries.push(generate_random_dna(query_len));
+    }
     let transposed = TQueries::new(&queries);
-    let target = b"CCCTCGCCCCCCATGCCCCC";
+    let target = generate_random_dna(10_000_000);
     let mut results = Vec::new();
-    mini_search_with_positions(&transposed, target, 1, None, &mut results);
-    println!("Result: {:?}", results);
+    mini_search_with_positions(&transposed, &target, 4, None, &mut results);
+    black_box(&results);
 }

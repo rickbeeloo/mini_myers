@@ -42,7 +42,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut results = Vec::new();
 
     let target_lens = vec![50_000];
-    let query_lens = vec![32];
+    let query_lens = vec![24];
     let ks = vec![4];
     let iterations = 100;
     let n_queries = 192;
@@ -106,7 +106,7 @@ fn run_bench_round(
 
     // let mut results = Vec::new();
     let mini_total: Duration = time_iterations(iterations, || {
-        let results = mini_search(&transposed, &target, k, Some(0.5));
+        let results = mini_search(&transposed, &target, k, None);
         black_box(&results);
     });
 
