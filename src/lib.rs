@@ -260,9 +260,14 @@ fn search_simd(transposed: &TQueries, target: &[u8], k: u8) -> Vec<i32> {
             let ph = mv | (all_ones ^ (xh | pv));
             let mh = pv & xh;
             // Track edit distance cost
-            let ph_bit_mask = (ph & mask_vec).cmp_eq(zero_v);
+            //let ph_bit_mask = (ph & mask_vec).cmp_eq(zero_v); // wide 0.7, faster it seems
+            let ph_bit_mask = (ph & mask_vec).simd_eq(zero_v);
+
             let ph_bit = (all_ones ^ ph_bit_mask) & one_v;
-            let mh_bit_mask = (mh & mask_vec).cmp_eq(zero_v);
+
+            //let mh_bit_mask = (mh & mask_vec).cmp_eq(zero_v); // wide 0.7, faster it seems
+            let mh_bit_mask = (mh & mask_vec).simd_eq(zero_v);
+
             let mh_bit = (all_ones ^ mh_bit_mask) & one_v;
             let ph_shift = ph << 1;
             let new_pv = (mh << 1) | (all_ones ^ (xv | ph_shift));
@@ -284,7 +289,8 @@ fn search_simd(transposed: &TQueries, target: &[u8], k: u8) -> Vec<i32> {
 
     for v in 0..vectors_in_block {
         let min_score = unsafe { *min_scores_vec.get_unchecked(v) };
-        let mask = all_ones ^ min_score.cmp_gt(k_v);
+        //let mask = all_ones ^ min_score.cmp_gt(k_v); // wide 0.7, faster it seems
+        let mask = all_ones ^ min_score.simd_gt(k_v);
         let selected = mask.blend(min_score, neg1_v);
         let base = v * SIMD_LANES;
         let end = (base + SIMD_LANES).min(nq);
