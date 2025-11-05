@@ -2,6 +2,8 @@
 Simple SIMD Myers implementation to "check" whether short patterns (<=32nt) are present in a longer 
 text with at most `k` edits. 
 
+Mainly for [Barbell](https://github.com/rickbeeloo/barbell) as a faster pre-filter before running [sassy](https://github.com/RagnarGrootKoerkamp/sassy/)
+
 ---
 
 ### When to use
@@ -20,6 +22,10 @@ we see along the entire text and report the cost when below the cut-off `k`, or 
 --- 
 
 #### How to use:
+
+
+#### Without position tracking
+This will just return the lowest edits found (below `k`) for each query. 
 ```rust
 use mini_myers::{TQueries, mini_search};
 
@@ -30,13 +36,32 @@ let result = mini_search(&transposed, target, 4);
 println!("Result: {:?}", result); 
 // [0,1] (ATG = 0 edits, TTG = 1 edit)
 ```
+
+#### With position tracking
+
+```rust
+use mini_myers::{TQueries, mini_search_with_positions};
+
+let queries = vec![b"ATG".to_vec(), b"TTG".to_vec()];
+let transposed = TQueries::new(&queries);
+let target = b"CCCTCGCCCCCCATGCCCCC";
+let mut results = Vec::new();
+let result = mini_search_with_positions(&transposed, target, 4, &mut results);
+println!("Result: {:?}", result); 
+// Result: [MatchInfo { query_idx: 1, cost: 1, pos: 5 }, MatchInfo { query_idx: 0, cost: 1, pos: 13 }, MatchInfo { query_idx: 0, cost: 0, pos: 14 }, MatchInfo { query_idx: 1, cost: 1, pos: 14 }, MatchInfo { query_idx: 0, cost: 1, pos: 15 }]
+```
+This returns *all* positions, which is not ideal perhaps, sassy returns the local minima position.
+
 ---
+
+
 
 #### Benchmark
 Note that `mini_myers` and `sassy` are not directly comparable. 
 `mini_seaerch` just tells us if something is present below `k`,
 `mini_search_with_positions` does return the match locations similar
-to `sassy` though without traceback. 
+to `sassy` though without traceback. Here we have a batch of 32 which 
+is ideal for `mini_myers` as well.
 
 | Profile | Query Len | µs/query (mini_myers) | µs/query (sassy) | Function                      |
 |---------|-----------|-----------------------|------------------|-------------------------------|
