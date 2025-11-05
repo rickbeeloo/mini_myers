@@ -1,5 +1,4 @@
 use crate::constant::*;
-use std::mem::MaybeUninit;
 #[cfg(not(feature = "latest_wide"))]
 use wide_v07 as wide;
 #[cfg(feature = "latest_wide")]
@@ -124,62 +123,11 @@ struct OverhangColumnCtx {
     scale_shift: u32,
 }
 
-#[derive(Copy, Clone)]
-#[repr(C, align(32))]
-struct ColumnState {
-    pv: i32x8,
-    mv: i32x8,
-    score: i32x8,
-}
-
-impl ColumnState {
-    #[inline(always)]
-    fn new(initial_score: i32, all_ones: i32x8, zero_v: i32x8) -> Self {
-        Self {
-            pv: all_ones,
-            mv: zero_v,
-            score: i32x8::splat(initial_score),
-        }
-    }
-
-    #[inline(always)]
-    fn advance(&mut self, eq: i32x8, adjust_vec: i32x8, ctx: OverhangColumnCtx) -> i32x8 {
-        apply_overhang_column(self, eq, adjust_vec, ctx)
-    }
-}
-
-#[derive(Copy, Clone)]
-#[repr(C, align(32))]
-struct ColumnStateWithMin {
-    state: ColumnState,
-    best_adjusted: i32x8,
-}
-
-impl ColumnStateWithMin {
-    #[inline(always)]
-    fn new(initial_score: i32, initial_adjusted: i32, all_ones: i32x8, zero_v: i32x8) -> Self {
-        Self {
-            state: ColumnState::new(initial_score, all_ones, zero_v),
-            best_adjusted: i32x8::splat(initial_adjusted),
-        }
-    }
-
-    #[inline(always)]
-    fn advance(&mut self, eq: i32x8, adjust_vec: i32x8, ctx: OverhangColumnCtx) -> i32x8 {
-        let adjusted = apply_overhang_column(&mut self.state, eq, adjust_vec, ctx);
-        self.best_adjusted = self.best_adjusted.min(adjusted);
-        adjusted
-    }
-
-    #[inline(always)]
-    fn best_adjusted(&self) -> i32x8 {
-        self.best_adjusted
-    }
-}
-
 #[inline(always)]
-fn apply_overhang_column(
-    state: &mut ColumnState,
+fn advance_column(
+    pv: &mut i32x8,
+    mv: &mut i32x8,
+    score: &mut i32x8,
     eq: i32x8,
     adjust_vec: i32x8,
     ctx: OverhangColumnCtx,
@@ -189,8 +137,8 @@ fn apply_overhang_column(
     let one_v = ctx.one_v;
     let mask_vec = ctx.mask_vec;
 
-    let pv_val = state.pv;
-    let mv_val = state.mv;
+    let pv_val = *pv;
+    let mv_val = *mv;
     let xv = eq | mv_val;
     let xh = (((eq & pv_val) + pv_val) ^ pv_val) | eq;
     let ph = mv_val | (all_ones ^ (xh | pv_val));
@@ -213,11 +161,11 @@ fn apply_overhang_column(
     let new_pv = (mh << 1) | (all_ones ^ (xv | ph_shift));
     let new_mv = ph_shift & xv;
 
-    state.pv = new_pv;
-    state.mv = new_mv;
+    *pv = new_pv;
+    *mv = new_mv;
 
-    let new_score = state.score + (ph_bit - mh_bit);
-    state.score = new_score;
+    let new_score = *score + (ph_bit - mh_bit);
+    *score = new_score;
 
     let new_score_scaled = new_score << ctx.scale_shift;
     new_score_scaled - adjust_vec
@@ -251,19 +199,10 @@ pub(crate) fn search_simd_core(
     let zero_eq_vec = i32x8::splat(0);
 
     let initial_adjusted = (m as i32) * alpha_scaled;
-    let mut states: Vec<ColumnStateWithMin> = Vec::with_capacity(vectors_in_block);
-    unsafe {
-        let ptr = states.as_mut_ptr() as *mut MaybeUninit<ColumnStateWithMin>;
-        for i in 0..vectors_in_block {
-            ptr.add(i).write(MaybeUninit::new(ColumnStateWithMin::new(
-                m as i32,
-                initial_adjusted,
-                all_ones,
-                zero_v,
-            )));
-        }
-        states.set_len(vectors_in_block);
-    }
+    let mut pv = vec![all_ones; vectors_in_block];
+    let mut mv = vec![zero_v; vectors_in_block];
+    let mut score = vec![i32x8::splat(m as i32); vectors_in_block];
+    let mut best_adjusted = vec![i32x8::splat(initial_adjusted); vectors_in_block];
 
     let high_bit: u32 = 1u32 << (m - 1);
     let mask_vec = i32x8::splat(high_bit as i32);
@@ -285,10 +224,19 @@ pub(crate) fn search_simd_core(
         let adjust_vec = i32x8::splat(overhang * extra_penalty_scaled);
         let peq_slice = unsafe { transposed.peqs.get_unchecked(encoded as usize) };
 
-        for v in 0..vectors_in_block {
-            let eq = unsafe { *peq_slice.get_unchecked(v) };
-            unsafe {
-                states.get_unchecked_mut(v).advance(eq, adjust_vec, ctx);
+        unsafe {
+            for block_idx in 0..vectors_in_block {
+                let eq = *peq_slice.get_unchecked(block_idx);
+                let adjusted = advance_column(
+                    pv.get_unchecked_mut(block_idx),
+                    mv.get_unchecked_mut(block_idx),
+                    score.get_unchecked_mut(block_idx),
+                    eq,
+                    adjust_vec,
+                    ctx,
+                );
+                let best_slot = best_adjusted.get_unchecked_mut(block_idx);
+                *best_slot = (*best_slot).min(adjusted);
             }
         }
     }
@@ -296,11 +244,18 @@ pub(crate) fn search_simd_core(
     if alpha_scaled < SCALE {
         for trailing in 1..=m {
             let adjust_vec = i32x8::splat((trailing as i32) * extra_penalty_scaled);
-            for v in 0..vectors_in_block {
-                unsafe {
-                    states
-                        .get_unchecked_mut(v)
-                        .advance(zero_eq_vec, adjust_vec, ctx);
+            unsafe {
+                for block_idx in 0..vectors_in_block {
+                    let adjusted = advance_column(
+                        pv.get_unchecked_mut(block_idx),
+                        mv.get_unchecked_mut(block_idx),
+                        score.get_unchecked_mut(block_idx),
+                        zero_eq_vec,
+                        adjust_vec,
+                        ctx,
+                    );
+                    let best_slot = best_adjusted.get_unchecked_mut(block_idx);
+                    *best_slot = (*best_slot).min(adjusted);
                 }
             }
         }
@@ -309,16 +264,14 @@ pub(crate) fn search_simd_core(
     let mut result = vec![-1.0f32; nq];
     let neg_mask = i32x8::splat(i32::MAX);
 
-    for (v, state) in states.iter().enumerate() {
-        let min_adj = state.best_adjusted();
-
+    for (block_idx, &min_adj) in best_adjusted.iter().enumerate() {
         #[cfg(not(feature = "latest_wide"))]
         let mask = all_ones ^ min_adj.cmp_gt(k_scaled_vec);
         #[cfg(feature = "latest_wide")]
         let mask = all_ones ^ min_adj.simd_gt(k_scaled_vec);
 
         let selected = mask.blend(min_adj, neg_mask);
-        let base = v * SIMD_LANES;
+        let base = block_idx * SIMD_LANES;
         let end = (base + SIMD_LANES).min(nq);
         let selected_arr = selected.to_array();
         for (lane_idx, &val) in selected_arr[..(end - base)].iter().enumerate() {
@@ -358,16 +311,9 @@ fn search_simd_with_positions_core(
     let k_scaled_vec = i32x8::splat(k_scaled);
     let inv_scale = 1.0f32 / (SCALE as f32);
 
-    let mut states: Vec<ColumnStateWithMin> = Vec::with_capacity(vectors_in_block);
-    unsafe {
-        let ptr = states.as_mut_ptr() as *mut MaybeUninit<ColumnState>;
-        for i in 0..vectors_in_block {
-            ptr.add(i).write(MaybeUninit::new(ColumnState::new(
-                m as i32, all_ones, zero_v,
-            )));
-        }
-        states.set_len(vectors_in_block);
-    }
+    let mut pv = vec![all_ones; vectors_in_block];
+    let mut mv = vec![zero_v; vectors_in_block];
+    let mut score = vec![i32x8::splat(m as i32); vectors_in_block];
 
     let high_bit: u32 = 1u32 << (m - 1);
     let mask_vec = i32x8::splat(high_bit as i32);
@@ -390,28 +336,37 @@ fn search_simd_with_positions_core(
         let peq_slice = unsafe { transposed.peqs.get_unchecked(encoded as usize) };
         let pos = idx as i32;
 
-        for v in 0..vectors_in_block {
-            let eq = unsafe { *peq_slice.get_unchecked(v) };
-            let adjusted = unsafe { states.get_unchecked_mut(v).advance(eq, adjust_vec, ctx) };
+        unsafe {
+            for block_idx in 0..vectors_in_block {
+                let eq = *peq_slice.get_unchecked(block_idx);
+                let adjusted = advance_column(
+                    pv.get_unchecked_mut(block_idx),
+                    mv.get_unchecked_mut(block_idx),
+                    score.get_unchecked_mut(block_idx),
+                    eq,
+                    adjust_vec,
+                    ctx,
+                );
 
-            #[cfg(not(feature = "latest_wide"))]
-            let match_mask = all_ones ^ adjusted.cmp_gt(k_scaled_vec);
-            #[cfg(feature = "latest_wide")]
-            let match_mask = all_ones ^ adjusted.simd_gt(k_scaled_vec);
+                #[cfg(not(feature = "latest_wide"))]
+                let match_mask = all_ones ^ adjusted.cmp_gt(k_scaled_vec);
+                #[cfg(feature = "latest_wide")]
+                let match_mask = all_ones ^ adjusted.simd_gt(k_scaled_vec);
 
-            let match_bits = unsafe { std::mem::transmute::<i32x8, [i32; 8]>(match_mask) };
-            if match_bits.iter().any(|&b| b != 0) {
-                let adjusted_arr = adjusted.to_array();
-                let base = v * SIMD_LANES;
-                let end = (base + SIMD_LANES).min(nq);
+                let match_bits = match_mask.to_array();
+                if match_bits.iter().any(|&b| b != 0) {
+                    let adjusted_arr = adjusted.to_array();
+                    let base = block_idx * SIMD_LANES;
+                    let end = (base + SIMD_LANES).min(nq);
 
-                for (i, &score_scaled) in adjusted_arr[..(end - base)].iter().enumerate() {
-                    if score_scaled <= k_scaled {
-                        results.push(MatchInfo {
-                            query_idx: base + i,
-                            cost: score_scaled as f32 * inv_scale,
-                            pos,
-                        });
+                    for (i, &score_scaled) in adjusted_arr[..(end - base)].iter().enumerate() {
+                        if score_scaled <= k_scaled {
+                            results.push(MatchInfo {
+                                query_idx: base + i,
+                                cost: score_scaled as f32 * inv_scale,
+                                pos,
+                            });
+                        }
                     }
                 }
             }
@@ -423,31 +378,36 @@ fn search_simd_with_positions_core(
             let adjust_vec = i32x8::splat((trailing as i32) * extra_penalty_scaled);
             let pos = (target.len() + trailing - 1) as i32;
 
-            for v in 0..vectors_in_block {
-                let adjusted = unsafe {
-                    states
-                        .get_unchecked_mut(v)
-                        .advance(zero_eq_vec, adjust_vec, ctx)
-                };
+            unsafe {
+                for block_idx in 0..vectors_in_block {
+                    let adjusted = advance_column(
+                        pv.get_unchecked_mut(block_idx),
+                        mv.get_unchecked_mut(block_idx),
+                        score.get_unchecked_mut(block_idx),
+                        zero_eq_vec,
+                        adjust_vec,
+                        ctx,
+                    );
 
-                #[cfg(not(feature = "latest_wide"))]
-                let match_mask = all_ones ^ adjusted.cmp_gt(k_scaled_vec);
-                #[cfg(feature = "latest_wide")]
-                let match_mask = all_ones ^ adjusted.simd_gt(k_scaled_vec);
+                    #[cfg(not(feature = "latest_wide"))]
+                    let match_mask = all_ones ^ adjusted.cmp_gt(k_scaled_vec);
+                    #[cfg(feature = "latest_wide")]
+                    let match_mask = all_ones ^ adjusted.simd_gt(k_scaled_vec);
 
-                let match_bits = unsafe { std::mem::transmute::<i32x8, [i32; 8]>(match_mask) };
-                if match_bits.iter().any(|&b| b != 0) {
-                    let adjusted_arr = adjusted.to_array();
-                    let base = v * SIMD_LANES;
-                    let end = (base + SIMD_LANES).min(nq);
+                    let match_bits = match_mask.to_array();
+                    if match_bits.iter().any(|&b| b != 0) {
+                        let adjusted_arr = adjusted.to_array();
+                        let base = block_idx * SIMD_LANES;
+                        let end = (base + SIMD_LANES).min(nq);
 
-                    for (i, &score_scaled) in adjusted_arr[..(end - base)].iter().enumerate() {
-                        if score_scaled <= k_scaled {
-                            results.push(MatchInfo {
-                                query_idx: base + i,
-                                cost: score_scaled as f32 * inv_scale,
-                                pos,
-                            });
+                        for (i, &score_scaled) in adjusted_arr[..(end - base)].iter().enumerate() {
+                            if score_scaled <= k_scaled {
+                                results.push(MatchInfo {
+                                    query_idx: base + i,
+                                    cost: score_scaled as f32 * inv_scale,
+                                    pos,
+                                });
+                            }
                         }
                     }
                 }
