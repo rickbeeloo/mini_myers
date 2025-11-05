@@ -22,15 +22,20 @@ use wide_v08 as wide;
 
 #[derive(Debug, Clone)]
 pub struct TQueries {
-    /// SIMD vectors representing transposed queries, one vector per position
-    pub vectors: Vec<u8x32>,
+    /// SIMD vectors representing transposed queries, one vector per position per block
+    /// Layout: vectors[position][block_idx] where each block contains up to 32 queries
+    pub vectors: Vec<Vec<u8x32>>,
     /// Length of each query (all queries must have the same length)
     pub query_length: usize,
-    /// Number of queries (must be ≤32)
+    /// Number of queries
     pub n_queries: usize,
+    /// Number of blocks of 32 queries needed
+    pub n_blocks: usize,
     /// Precomputed peq bitvectors keyed by IUPAC mask (0..=15)
+    /// Layout: peq_masks[iupac_mask][query_idx]
     pub peq_masks: [Vec<u32>; IUPAC_MASKS],
     /// Precomputed peq bitvectors for each IUPAC mask
+    /// Layout: peqs[iupac_mask][simd_vector_idx] where each SIMD vector contains 8 i32 lanes
     pub peqs: [Vec<i32x8>; IUPAC_MASKS],
 }
 
@@ -66,8 +71,7 @@ impl TQueries {
     /// Creates a new `TQueries` structure from a slice of query sequences.
     ///
     /// This method transposes the queries and precomputes the peq bitvectors
-    /// for the Myers algorithm. All queries must have the same length, and the number
-    /// of queries must not exceed 32 (but can be less)
+    /// for the Myers algorithm. All queries must have the same length (which is <= 32).
     ///
     /// # Arguments
     ///
@@ -91,17 +95,22 @@ impl TQueries {
         );
 
         let n_queries = queries.len();
-        assert!(n_queries <= 32, "Number of queries exceeds 32");
-
         assert!(
             query_length > 0 && query_length <= 32,
             "Query length must be 1..=32"
         );
 
-        let mut vector_data: Vec<[u8; 32]> = vec![[0u8; 32]; query_length];
+        // Calculate how many blocks of 32 queries we need
+        let n_blocks = n_queries.div_ceil(32);
+
+        // Initialize vector data: [position][block][query_in_block]
+        let mut vector_data: Vec<Vec<[u8; 32]>> = vec![vec![[0u8; 32]; n_blocks]; query_length];
         let mut peq_masks: [Vec<u32>; IUPAC_MASKS] = std::array::from_fn(|_| vec![0u32; n_queries]);
 
         for (qi, q) in queries.iter().enumerate() {
+            let block_idx = qi / 32;
+            let idx_in_block = qi % 32;
+
             for (pos, &raw_c) in q.iter().enumerate() {
                 let encoded = crate::iupac::get_encoded(raw_c);
                 assert!(
@@ -111,7 +120,7 @@ impl TQueries {
                     raw_c as char
                 );
 
-                vector_data[pos][qi] = raw_c.to_ascii_uppercase();
+                vector_data[pos][block_idx][idx_in_block] = raw_c.to_ascii_uppercase();
                 let bit = 1u32 << pos;
                 if encoded != 0 {
                     for (mask_idx, mask_vec) in peq_masks.iter_mut().enumerate().skip(1) {
@@ -124,16 +133,20 @@ impl TQueries {
             }
         }
 
-        let vectors = vector_data.into_iter().map(u8x32::new).collect();
+        // Convert to SIMD vectors
+        let vectors: Vec<Vec<u8x32>> = vector_data
+            .into_iter()
+            .map(|pos_blocks| pos_blocks.into_iter().map(u8x32::new).collect())
+            .collect();
 
-        let nq = n_queries;
-        let vectors_in_block = nq.div_ceil(SIMD_LANES);
-        let peqs = build_peqs_vectors(&peq_masks, nq, vectors_in_block);
+        let vectors_in_block = n_queries.div_ceil(SIMD_LANES);
+        let peqs = build_peqs_vectors(&peq_masks, n_queries, vectors_in_block);
 
         Self {
             vectors,
             query_length,
             n_queries,
+            n_blocks,
             peq_masks,
             peqs,
         }
