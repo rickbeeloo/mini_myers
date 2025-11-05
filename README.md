@@ -2,7 +2,8 @@
 Simple SIMD Myers implementation to "check" whether short patterns (<=32nt) are present in a longer 
 text with at most `k` edits. 
 
-Mainly for [Barbell](https://github.com/rickbeeloo/barbell) as a faster pre-filter before running [sassy](https://github.com/RagnarGrootKoerkamp/sassy/)
+Mainly for [Barbell](https://github.com/rickbeeloo/barbell) as a faster pre-filter before running [sassy](https://github.com/RagnarGrootKoerkamp/sassy/),
+so most likely you are looking for [sassy](https://github.com/RagnarGrootKoerkamp/sassy/) instead.
 
 ---
 

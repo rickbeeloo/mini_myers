@@ -14,7 +14,7 @@ pub struct MatchInfo {
     pub query_idx: usize,
     /// Minimum edit distance found (0 to k), including overhang penalties when used
     pub cost: f32,
-    /// Position in target where best match ends (0-based), or -1 if no match
+    /// Position in target where best match ends (0-based)
     pub pos: i32,
 }
 
@@ -22,7 +22,6 @@ pub struct MatchInfo {
 /// Returning the minimum edits found for the query in the entire target, or
 /// `-1.0` if below the provided maximum edit distance `k`.
 ///
-/// The SIMD backend currently relies on `wide::i32x8` (8 lanes) for batched processing.
 ///
 /// # Arguments
 ///
@@ -282,7 +281,7 @@ fn search_simd_core(transposed: &TQueries, target: &[u8], k: u8, alpha: f32) -> 
     result
 }
 
-/// SIMD search with position tracking - optimized for minimal overhead.
+/// SIMD search with position tracking.
 /// Tracks ALL positions where score <= k by incrementally collecting matches.
 /// Core SIMD Myers search with position tracking and optional overhang penalty `alpha`.
 #[inline(always)]

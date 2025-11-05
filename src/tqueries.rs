@@ -14,7 +14,6 @@
 /// assert_eq!(transposed.query_length, 3);
 /// ```
 use crate::constant::*;
-use crate::constant::*;
 use wide::{i32x8, u8x32};
 #[cfg(not(feature = "latest_wide"))]
 use wide_v07 as wide;
