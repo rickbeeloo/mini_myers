@@ -76,6 +76,8 @@ pub struct TQueries {
     pub n_queries: usize,
     /// Precomputed peq bitvectors keyed by IUPAC mask (0..=15)
     pub peq_masks: [Vec<u32>; IUPAC_MASKS],
+    /// Precomputed peq bitvectors for each IUPAC mask
+    pub peqs: [Vec<i32x8>; IUPAC_MASKS],
 }
 
 impl TQueries {
@@ -142,11 +144,16 @@ impl TQueries {
 
         let vectors = vector_data.into_iter().map(u8x32::new).collect();
 
+        let nq = n_queries;
+        let vectors_in_block = nq.div_ceil(SIMD_LANES);
+        let peqs = build_peqs_vectors(&peq_masks, nq, vectors_in_block);
+
         Self {
             vectors,
             query_length,
             n_queries,
             peq_masks,
+            peqs,
         }
     }
 }
@@ -294,11 +301,7 @@ fn search_simd(transposed: &TQueries, target: &[u8], k: u8) -> Vec<i32> {
     let nq = transposed.n_queries;
     let m = transposed.query_length;
 
-    let peq_masks = &transposed.peq_masks;
-
     let vectors_in_block = nq.div_ceil(SIMD_LANES);
-
-    let peqs = build_peqs_vectors(peq_masks, nq, vectors_in_block);
 
     let all_ones = i32x8::splat(!0);
     let zero_v = i32x8::splat(0);
@@ -319,7 +322,7 @@ fn search_simd(transposed: &TQueries, target: &[u8], k: u8) -> Vec<i32> {
         if encoded == INVALID_IUPAC {
             panic!("Target contains invalid IUPAC character: {:?}", tb as char);
         }
-        let peq_slice = unsafe { peqs.get_unchecked(encoded as usize) };
+        let peq_slice = unsafe { transposed.peqs.get_unchecked(encoded as usize) };
         for v in 0..vectors_in_block {
             // Regular Myers
             let eq = unsafe { *peq_slice.get_unchecked(v) };
@@ -388,18 +391,14 @@ fn search_simd_with_positions(
     k: u8,
     results: &mut Vec<MatchInfo>,
 ) {
-    let nq = transposed.n_queries;
-    let m = transposed.query_length;
-
-    let peq_masks = &transposed.peq_masks;
-
-    let vectors_in_block = nq.div_ceil(SIMD_LANES);
-
-    let peqs = build_peqs_vectors(peq_masks, nq, vectors_in_block);
-
     let all_ones = i32x8::splat(!0);
     let zero_v = i32x8::splat(0);
     let one_v = i32x8::splat(1);
+
+    let nq = transposed.n_queries;
+    let m = transposed.query_length;
+
+    let vectors_in_block = nq.div_ceil(SIMD_LANES);
 
     let mut pv_vec: Vec<i32x8> = vec![all_ones; vectors_in_block];
     let mut mv_vec: Vec<i32x8> = vec![zero_v; vectors_in_block];
@@ -409,15 +408,12 @@ fn search_simd_with_positions(
     let mask_vec = i32x8::splat(high_bit as i32);
     let k_v = i32x8::splat(k as i32);
 
-    // let estimated_matches = (target.len() * nq / 10).max(nq);
-    // let mut result = Vec::with_capacity(estimated_matches);
-
     for (pos_counter, &tb) in target.iter().enumerate() {
         let encoded = get_encoded(tb);
         if encoded == INVALID_IUPAC {
             panic!("Target contains invalid IUPAC character: {:?}", tb as char);
         }
-        let peq_slice = unsafe { peqs.get_unchecked(encoded as usize) };
+        let peq_slice = unsafe { transposed.peqs.get_unchecked(encoded as usize) };
         for v in 0..vectors_in_block {
             // Regular Myers
             let eq = unsafe { *peq_slice.get_unchecked(v) };
