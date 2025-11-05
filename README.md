@@ -1,5 +1,5 @@
 ### 🤏 Mini Myers
-Simple SIMD Myers implementation to "check" whether short patterns (<=32nt) are present in a longer 
+SIMD Myers implementation to "check" whether "batches" of short patterns (<=32nt) are present in a longer 
 text with at most `k` edits. 
 
 Mainly for [Barbell](https://github.com/rickbeeloo/barbell) as a faster pre-filter before running [sassy](https://github.com/RagnarGrootKoerkamp/sassy/),
@@ -69,8 +69,6 @@ In the example above, this would give a cost of `3 * 0.5 = 1.5`
 
 
 ---
-
-
 
 #### Benchmark
 Note that `mini_myers` and `sassy` are not directly comparable. 

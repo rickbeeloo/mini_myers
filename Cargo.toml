@@ -8,7 +8,7 @@ description = "SIMD myers for short queries"
 readme = "README.md"
 homepage = "https://github.com/rickbeeloo/mini_myers"
 repository = "https://github.com/rickbeeloo/mini_myers"
-keywords = ["simd", "myers", "short queries", "dna"]
+keywords = ["simd", "myers", "short-seq", "dna"]
 categories = ["science"]
 
 [lib]
