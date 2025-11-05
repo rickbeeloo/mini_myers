@@ -90,5 +90,6 @@ is ideal for `mini_myers` as well.
 
 _Searching for 32 queries in a 100K DNA string with k=4._
 
+Run the bench using `cargo bench --bench sassy`.
 
 
