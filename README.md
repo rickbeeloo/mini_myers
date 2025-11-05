@@ -11,7 +11,6 @@ so most likely you are looking for [sassy](https://github.com/RagnarGrootKoerkam
 - Short queries (`<=32`)
 - Search for multiple of `8` queries
 
-**Most likely you want something like [sassy](https://github.com/RagnarGrootKoerkamp/sassy/)** instead.
 
 --- 
 
