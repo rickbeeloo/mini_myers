@@ -1,10 +1,6 @@
 use crate::constant::*;
-#[cfg(not(feature = "latest_wide"))]
-use wide_v07 as wide;
-#[cfg(feature = "latest_wide")]
-use wide_v08 as wide;
-
 use crate::tqueries::*;
+use wide;
 use wide::{i32x8, CmpEq, CmpGt};
 
 /// Match information including position and cost for a query.
@@ -203,43 +199,29 @@ fn advance_column(
     let zero_v = ctx.zero_v;
     let one_v = ctx.one_v;
     let mask_vec = ctx.mask_vec;
-
     let pv_val = *pv;
     let mv_val = *mv;
     let xv = eq | mv_val;
     let xh = (((eq & pv_val) + pv_val) ^ pv_val) | eq;
     let ph = mv_val | (all_ones ^ (xh | pv_val));
     let mh = pv_val & xh;
-
-    #[cfg(not(feature = "latest_wide"))]
-    let ph_bit_mask = (ph & mask_vec).cmp_eq(zero_v);
-    #[cfg(feature = "latest_wide")]
     let ph_bit_mask = (ph & mask_vec).simd_eq(zero_v);
-
     let ph_bit = (all_ones ^ ph_bit_mask) & one_v;
-
-    #[cfg(not(feature = "latest_wide"))]
-    let mh_bit_mask = (mh & mask_vec).cmp_eq(zero_v);
-    #[cfg(feature = "latest_wide")]
     let mh_bit_mask = (mh & mask_vec).simd_eq(zero_v);
-
     let mh_bit = (all_ones ^ mh_bit_mask) & one_v;
     let ph_shift = ph << 1;
     let new_pv = (mh << 1) | (all_ones ^ (xv | ph_shift));
     let new_mv = ph_shift & xv;
-
     *pv = new_pv;
     *mv = new_mv;
-
     let new_score = *score + (ph_bit - mh_bit);
     *score = new_score;
-
     let new_score_scaled = new_score << ctx.scale_shift;
     new_score_scaled - adjust_vec
 }
 
 /// Core SIMD Myers implementation re-using allocs
-#[inline(never)]
+#[inline(always)]
 pub(crate) fn search_simd_core(
     state: &mut MyersSearchState,
     transposed: &TQueries,
@@ -320,11 +302,7 @@ pub(crate) fn search_simd_core(
     let neg_mask = i32x8::splat(i32::MAX);
 
     for (block_idx, &min_adj) in state.best_adjusted.iter().enumerate() {
-        #[cfg(not(feature = "latest_wide"))]
-        let mask = all_ones ^ min_adj.cmp_gt(k_scaled_vec);
-        #[cfg(feature = "latest_wide")]
         let mask = all_ones ^ min_adj.simd_gt(k_scaled_vec);
-
         let selected = mask.blend(min_adj, neg_mask);
         let base = block_idx * SIMD_LANES;
         let end = (base + SIMD_LANES).min(nq);
@@ -393,12 +371,7 @@ fn search_simd_with_positions_core(
                     adjust_vec,
                     ctx,
                 );
-
-                #[cfg(not(feature = "latest_wide"))]
-                let match_mask = all_ones ^ adjusted.cmp_gt(k_scaled_vec);
-                #[cfg(feature = "latest_wide")]
                 let match_mask = all_ones ^ adjusted.simd_gt(k_scaled_vec);
-
                 let match_bits = match_mask.to_array();
                 if match_bits.iter().any(|&b| b != 0) {
                     let adjusted_arr = adjusted.to_array();
@@ -434,13 +407,8 @@ fn search_simd_with_positions_core(
                         adjust_vec,
                         ctx,
                     );
-
-                    #[cfg(not(feature = "latest_wide"))]
-                    let match_mask = all_ones ^ adjusted.cmp_gt(k_scaled_vec);
-                    #[cfg(feature = "latest_wide")]
-                    let match_mask = all_ones ^ adjusted.simd_gt(k_scaled_vec);
-
-                    let match_bits = match_mask.to_array();
+                    let match_masks = all_ones ^ adjusted.simd_gt(k_scaled_vec);
+                    let match_bits = match_masks.to_array();
                     if match_bits.iter().any(|&b| b != 0) {
                         let adjusted_arr = adjusted.to_array();
                         let base = block_idx * SIMD_LANES;

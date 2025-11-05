@@ -21,24 +21,8 @@ path = "src/main.rs"
 
 [dependencies]
 rand = "0.8.5"
+wide = "0.8.1"
 
-# By default, use wide 0.7; user can enable "latest_wide" for 0.8.1 instead.
-[dependencies.wide_v07]
-package = "wide"
-version = "0.7"
-optional = true
-
-[dependencies.wide_v08]
-package = "wide"
-version = "0.8.1"
-optional = true
-
-[features]
-default = ["old_wide"]
-old_wide = ["dep:wide_v07"]
-latest_wide = ["dep:wide_v08"]
-# Make old_wide and latest_wide mutually exclusive
-# When latest_wide is enabled, old_wide should be disabled
 
 [dev-dependencies]
 sassy = "0.1.6"

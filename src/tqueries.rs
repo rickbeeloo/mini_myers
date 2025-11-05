@@ -15,10 +15,6 @@
 /// ```
 use crate::constant::*;
 use wide::{i32x8, u8x32};
-#[cfg(not(feature = "latest_wide"))]
-use wide_v07 as wide;
-#[cfg(feature = "latest_wide")]
-use wide_v08 as wide;
 
 #[derive(Debug, Clone)]
 pub struct TQueries {
