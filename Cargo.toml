@@ -22,6 +22,7 @@ path = "src/main.rs"
 
 
 [dependencies]
+wide = "0.7"
 
 [dev-dependencies]
 sassy.git = "https://github.com/RagnarGrootKoerkamp/sassy.git"

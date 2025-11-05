@@ -5,7 +5,7 @@
 //!
 //! ## Features
 //!
-//! - **SIMD-accelerated**: Uses portable SIMD for parallel processing of multiple queries, number of lanes depends on the length of the queries.
+//! - **SIMD-accelerated**: Uses the `wide` crate for stable SIMD processing of multiple queries.
 //! - **Batch processing**: Process up to 32 queries simultaneously
 //!
 //! ## When to use
@@ -38,10 +38,9 @@
 //! - mini_myers: ~23 µs/query
 //! - See benchmarks for detailed comparisons
 
-#![feature(portable_simd)]
-use core::simd::Simd;
-use std::simd::cmp::{SimdOrd, SimdPartialEq, SimdPartialOrd};
-use std::simd::{LaneCount, SupportedLaneCount};
+use wide::{CmpEq, CmpGt, i32x8, u8x32};
+
+const SIMD_LANES: usize = 8;
 
 const IUPAC_MASKS: usize = 16;
 
@@ -63,7 +62,7 @@ const IUPAC_MASKS: usize = 16;
 #[derive(Debug, Clone)]
 pub struct TQueries {
     /// SIMD vectors representing transposed queries, one vector per position
-    pub vectors: Vec<Simd<u8, 32>>,
+    pub vectors: Vec<u8x32>,
     /// Length of each query (all queries must have the same length)
     pub query_length: usize,
     /// Number of queries (must be ≤32)
@@ -134,7 +133,7 @@ impl TQueries {
             }
         }
 
-        let vectors = vector_data.into_iter().map(Simd::from_array).collect();
+        let vectors = vector_data.into_iter().map(u8x32::new).collect();
 
         Self {
             vectors,
@@ -149,9 +148,7 @@ impl TQueries {
 /// Returning the minimum edits found for the query in the entire target, or
 /// `-1` if below the provided maximum edit distance `k`.
 ///
-/// The number of used SIMD lanes depends on the length of the queries:
-/// - Queries ≤16 nucleotides: uses 16 lanes
-/// - Queries >16 nucleotides: uses 8 lanes
+/// The SIMD backend currently relies on `wide::i32x8` (8 lanes) for batched processing.
 ///
 /// # Arguments
 ///
@@ -189,32 +186,23 @@ pub fn mini_search(transposed: &TQueries, target: &[u8], k: u8) -> Vec<i32> {
     }
     let m = transposed.query_length;
     assert!(m > 0 && m <= 32, "query length must be 1..=32");
-
-    // Use i32 throughout (like backup.rs), but with more lanes for short queries
-    if m <= 16 {
-        search_generic::<16>(transposed, target, k)
-    } else {
-        search_generic::<8>(transposed, target, k)
-    }
+    search_simd(transposed, target, k)
 }
 
 /// Build peqs vectors from precomputed masks.
 #[inline(always)]
-fn build_peqs_vectors<const LANES: usize>(
+fn build_peqs_vectors(
     peq_masks: &[Vec<u32>; IUPAC_MASKS],
     nq: usize,
     vectors_in_block: usize,
-) -> [Vec<Simd<i32, LANES>>; IUPAC_MASKS]
-where
-    LaneCount<LANES>: SupportedLaneCount,
-{
-    let mut peqs: [Vec<Simd<i32, LANES>>; IUPAC_MASKS] =
+) -> [Vec<i32x8>; IUPAC_MASKS] {
+    let mut peqs: [Vec<i32x8>; IUPAC_MASKS] =
         std::array::from_fn(|_| Vec::with_capacity(vectors_in_block));
 
     for v in 0..vectors_in_block {
-        let base = v * LANES;
+        let base = v * SIMD_LANES;
         for mask_idx in 0..IUPAC_MASKS {
-            let mut lane = [0i32; LANES];
+            let mut lane = [0i32; SIMD_LANES];
             let mask_vec = &peq_masks[mask_idx];
             for (lane_idx, lane_slot) in lane.iter_mut().enumerate() {
                 let qi = base + lane_idx;
@@ -222,7 +210,7 @@ where
                     *lane_slot = mask_vec[qi] as i32;
                 }
             }
-            peqs[mask_idx].push(Simd::from_array(lane));
+            peqs[mask_idx].push(i32x8::new(lane));
         }
     }
 
@@ -230,10 +218,7 @@ where
 }
 
 #[inline(always)]
-fn search_generic<const LANES: usize>(transposed: &TQueries, target: &[u8], k: u8) -> Vec<i32>
-where
-    LaneCount<LANES>: SupportedLaneCount,
-{
+fn search_simd(transposed: &TQueries, target: &[u8], k: u8) -> Vec<i32> {
     // todo: would be nice to also extract this to transposedQueries so we only
     // have to build the peq table once
     let nq = transposed.n_queries;
@@ -241,52 +226,46 @@ where
 
     let peq_masks = &transposed.peq_masks;
 
-    let vectors_in_block = nq.div_ceil(LANES);
-    //println!("Using {} vectors in block", vectors_in_block);
+    let vectors_in_block = nq.div_ceil(SIMD_LANES);
 
     let peqs = build_peqs_vectors(peq_masks, nq, vectors_in_block);
 
-    let all_ones = Simd::<i32, LANES>::splat(!0i32);
-    let zero_v = Simd::<i32, LANES>::splat(0i32);
-    let one_v = Simd::<i32, LANES>::splat(1i32);
+    let all_ones = i32x8::splat(!0);
+    let zero_v = i32x8::splat(0);
+    let one_v = i32x8::splat(1);
 
-    let mut pv_vec: Vec<Simd<i32, LANES>> = vec![all_ones; vectors_in_block];
-    let mut mv_vec: Vec<Simd<i32, LANES>> = vec![zero_v; vectors_in_block];
-    let mut scores_vec: Vec<Simd<i32, LANES>> =
-        vec![Simd::<i32, LANES>::splat(m as i32); vectors_in_block];
+    let mut pv_vec: Vec<i32x8> = vec![all_ones; vectors_in_block];
+    let mut mv_vec: Vec<i32x8> = vec![zero_v; vectors_in_block];
+    let mut scores_vec: Vec<i32x8> = vec![i32x8::splat(m as i32); vectors_in_block];
 
     let max_possible = (m + target.len()) as i32;
-    let mut min_scores_vec: Vec<Simd<i32, LANES>> =
-        vec![Simd::<i32, LANES>::splat(max_possible); vectors_in_block];
+    let mut min_scores_vec: Vec<i32x8> = vec![i32x8::splat(max_possible); vectors_in_block];
 
     let high_bit: u32 = 1u32 << (m - 1);
-    let mask_vec = Simd::<i32, LANES>::splat(high_bit as i32);
+    let mask_vec = i32x8::splat(high_bit as i32);
 
-    let target_len = target.len();
-    for t_idx in 0..target_len {
-        let tb = unsafe { target.get_unchecked(t_idx) };
-        let encoded = get_encoded(*tb);
-        // todo: not great to have the branch in the hot loop here, maybe we have to
-        // "assume" the user validated the input, or provide a seperate function
-        // for that,
+    for &tb in target {
+        let encoded = get_encoded(tb);
         if encoded == INVALID_IUPAC {
-            panic!("Target contains invalid IUPAC character: {:?}", *tb as char);
+            panic!("Target contains invalid IUPAC character: {:?}", tb as char);
         }
         let peq_slice = unsafe { peqs.get_unchecked(encoded as usize) };
         for v in 0..vectors_in_block {
             // Regular Myers
-            let eq = unsafe { peq_slice.get_unchecked(v) };
+            let eq = unsafe { *peq_slice.get_unchecked(v) };
             let pv = pv_vec[v];
             let mv = mv_vec[v];
             let xv = eq | mv;
             let xh = (((eq & pv) + pv) ^ pv) | eq;
-            let ph = mv | !(xh | pv);
+            let ph = mv | (all_ones ^ (xh | pv));
             let mh = pv & xh;
             // Track edit distance cost
-            let ph_bit = (ph & mask_vec).simd_ne(zero_v).to_int() & one_v;
-            let mh_bit = (mh & mask_vec).simd_ne(zero_v).to_int() & one_v;
+            let ph_bit_mask = (ph & mask_vec).cmp_eq(zero_v);
+            let ph_bit = (all_ones ^ ph_bit_mask) & one_v;
+            let mh_bit_mask = (mh & mask_vec).cmp_eq(zero_v);
+            let mh_bit = (all_ones ^ mh_bit_mask) & one_v;
             let ph_shift = ph << 1;
-            let new_pv = (mh << 1) | !(xv | ph_shift);
+            let new_pv = (mh << 1) | (all_ones ^ (xv | ph_shift));
             let new_mv = ph_shift & xv;
 
             unsafe {
@@ -295,23 +274,23 @@ where
                 let new_score = *scores_vec.get_unchecked(v) + (ph_bit - mh_bit);
                 *scores_vec.get_unchecked_mut(v) = new_score;
                 *min_scores_vec.get_unchecked_mut(v) =
-                    min_scores_vec.get_unchecked(v).simd_min(new_score);
+                    min_scores_vec.get_unchecked(v).min(new_score);
             }
         }
     }
-    let k_v = Simd::<i32, LANES>::splat(k as i32);
-    let neg1_v = Simd::<i32, LANES>::splat(-1);
+    let k_v = i32x8::splat(k as i32);
+    let neg1_v = i32x8::splat(-1);
     let mut result = vec![-1i32; nq];
 
     for v in 0..vectors_in_block {
         let min_score = unsafe { *min_scores_vec.get_unchecked(v) };
-        // we check for leq k, all positions got init to max edits as t.len() + m, which then become -1 here
-        let selected = min_score.simd_le(k_v).select(min_score, neg1_v);
-        let base = v * LANES;
-        let end = (base + LANES).min(nq);
-        result[base..end].copy_from_slice(&selected.to_array()[..end - base]);
+        let mask = all_ones ^ min_score.cmp_gt(k_v);
+        let selected = mask.blend(min_score, neg1_v);
+        let base = v * SIMD_LANES;
+        let end = (base + SIMD_LANES).min(nq);
+        let selected_arr = selected.to_array();
+        result[base..end].copy_from_slice(&selected_arr[..end - base]);
     }
-    //println!("Time taken: {:?}", end_time.duration_since(start_time));
     result
 }
 
