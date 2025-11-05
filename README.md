@@ -10,7 +10,7 @@ Mainly for [Barbell](https://github.com/rickbeeloo/barbell) as a faster pre-filt
 - Short queries (`<=32`)
 - Search for multiple of `8` queries
 
-**Most likely you want something like [sassy](https://github.com/RagnarGrootKoerkamp/sassy/)**, this is a faster prefilter to run before sassy but does not return the positions, nor works for longer queries.
+**Most likely you want something like [sassy](https://github.com/RagnarGrootKoerkamp/sassy/)** instead.
 
 --- 
 
