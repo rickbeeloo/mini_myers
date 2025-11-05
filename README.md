@@ -1,5 +1,4 @@
 [![crates.io](https://img.shields.io/crates/v/mini_myers.svg)](https://crates.io/crates/mini_myers)
-[![docs.rs](https://img.shields.io/docsrs/mini_myers.svg)](https://docs.rs/mini_myers)
 
 ### 🤏 Mini Myers
 SIMD Myers implementation to "check" whether "batches" of short patterns (<=32nt) are present in a longer 
