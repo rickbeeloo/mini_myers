@@ -66,12 +66,12 @@ is ideal for `mini_myers` as well.
 
 | Profile | Query Len | µs/query (mini_myers) | µs/query (sassy) | Function                      |
 |---------|-----------|-----------------------|------------------|-------------------------------|
-| IUPAC   |   24      | 23.5                  | 50.7             | mini_search                   |
-| IUPAC   |   32      | 23.9                  | 51.3             | mini_search                   |
-| DNA     |   24      | 23.2                  | 52.2             | mini_search                   |
-| DNA     |   32      | 23.1                  | 50.4             | mini_search                   |
-| IUPAC   |   24      | 32.3                  | 54.0             | mini_search_with_positions    |
-| IUPAC   |   32      | 32.8                  | 53.2             | mini_search_with_positions    |
+| IUPAC   |   24      | 23.5                  | 50.7             | `mini_search`                   |
+| IUPAC   |   32      | 23.9                  | 51.3             | `mini_search`                   |
+| DNA     |   24      | 23.2                  | 52.2             | `mini_search`                   |
+| DNA     |   32      | 23.1                  | 50.4             | `mini_search`                   |
+| IUPAC   |   24      | 32.3                  | 54.0             | `mini_search_with_positions`    |
+| IUPAC   |   32      | 32.8                  | 53.2             | `mini_search_with_positions`    |
 
 _Searching for 32 queries in a 100K DNA string with k=4._
 
