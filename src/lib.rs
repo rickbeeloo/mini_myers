@@ -38,7 +38,14 @@
 //! - mini_myers: ~23 µs/query
 //! - See benchmarks for detailed comparisons
 
-use wide::{CmpEq, CmpGt, i32x8, u8x32};
+#[cfg(not(feature = "latest_wide"))]
+use wide_v07 as wide;
+
+#[cfg(feature = "latest_wide")]
+use wide_v08 as wide;
+
+// These traits are needed for both versions (cmp_eq/simd_eq and cmp_gt/simd_gt)
+use wide::{i32x8, u8x32, CmpEq, CmpGt};
 
 const SIMD_LANES: usize = 8;
 
@@ -259,14 +266,19 @@ fn search_simd(transposed: &TQueries, target: &[u8], k: u8) -> Vec<i32> {
             let xh = (((eq & pv) + pv) ^ pv) | eq;
             let ph = mv | (all_ones ^ (xh | pv));
             let mh = pv & xh;
+
             // Track edit distance cost
-            //let ph_bit_mask = (ph & mask_vec).cmp_eq(zero_v); // wide 0.7, faster it seems
-            let ph_bit_mask = (ph & mask_vec).simd_eq(zero_v);
+            #[cfg(not(feature = "latest_wide"))]
+            let ph_bit_mask = (ph & mask_vec).cmp_eq(zero_v); // wide 0.7, faster it seems
+            #[cfg(feature = "latest_wide")]
+            let ph_bit_mask = (ph & mask_vec).simd_eq(zero_v); // performance regression in wide 0.8.1
 
             let ph_bit = (all_ones ^ ph_bit_mask) & one_v;
 
-            //let mh_bit_mask = (mh & mask_vec).cmp_eq(zero_v); // wide 0.7, faster it seems
-            let mh_bit_mask = (mh & mask_vec).simd_eq(zero_v);
+            #[cfg(not(feature = "latest_wide"))]
+            let mh_bit_mask = (mh & mask_vec).cmp_eq(zero_v); // wide 0.7, faster it seems
+            #[cfg(feature = "latest_wide")]
+            let mh_bit_mask = (mh & mask_vec).simd_eq(zero_v); // performance regression in wide 0.8.1
 
             let mh_bit = (all_ones ^ mh_bit_mask) & one_v;
             let ph_shift = ph << 1;
@@ -289,8 +301,12 @@ fn search_simd(transposed: &TQueries, target: &[u8], k: u8) -> Vec<i32> {
 
     for v in 0..vectors_in_block {
         let min_score = unsafe { *min_scores_vec.get_unchecked(v) };
-        //let mask = all_ones ^ min_score.cmp_gt(k_v); // wide 0.7, faster it seems
-        let mask = all_ones ^ min_score.simd_gt(k_v);
+
+        #[cfg(not(feature = "latest_wide"))]
+        let mask = all_ones ^ min_score.cmp_gt(k_v); // wide 0.7, faster it seems
+        #[cfg(feature = "latest_wide")]
+        let mask = all_ones ^ min_score.simd_gt(k_v); // performance regression in wide 0.8.1
+
         let selected = mask.blend(min_score, neg1_v);
         let base = v * SIMD_LANES;
         let end = (base + SIMD_LANES).min(nq);

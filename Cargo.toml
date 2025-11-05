@@ -1,7 +1,7 @@
 [package]
 name = "mini_myers"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
 authors = ["Rick Beeloo <biobeeloo@gmail.com>"]
 license = "MIT"
 description = "SIMD myers for short queries"
@@ -19,15 +19,30 @@ path = "src/lib.rs"
 name = "mini_myers"
 path = "src/main.rs"
 
-
-
 [dependencies]
-wide = "0.8.1"
-
-[dev-dependencies]
-sassy.git = "https://github.com/RagnarGrootKoerkamp/sassy.git"
 rand = "0.8.5"
 
+# By default, use wide 0.7; user can enable "latest_wide" for 0.8.1 instead.
+[dependencies.wide_v07]
+package = "wide"
+version = "0.7"
+optional = true
+
+[dependencies.wide_v08]
+package = "wide"
+version = "0.8.1"
+optional = true
+
+[features]
+default = ["old_wide"]
+old_wide = ["dep:wide_v07"]
+latest_wide = ["dep:wide_v08"]
+# Make old_wide and latest_wide mutually exclusive
+# When latest_wide is enabled, old_wide should be disabled
+
+[dev-dependencies]
+sassy = { git = "https://github.com/RagnarGrootKoerkamp/sassy.git" }
+rand = "0.8.5"
 
 [[bench]]
 name = "sassy"
