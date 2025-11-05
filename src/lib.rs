@@ -238,19 +238,25 @@ pub fn mini_search(transposed: &TQueries, target: &[u8], k: u8) -> Vec<i32> {
 /// let queries = vec![b"ATG".to_vec(), b"TTG".to_vec()];
 /// let transposed = TQueries::new(&queries);
 /// let target = b"CCCTCGCCCCCCATGCCCCC";
+/// let mut results = Vec::new();
 ///
-/// let result = mini_search_with_positions(&transposed, target, 4);
-/// // Each MatchInfo contains query_idx, cost, and position where match was found
+/// let result = mini_search_with_positions(&transposed, target, 4, &mut results);
+/// // Matches are now in results
 /// ```
 #[inline(always)]
-pub fn mini_search_with_positions(transposed: &TQueries, target: &[u8], k: u8) -> Vec<MatchInfo> {
+pub fn mini_search_with_positions(
+    transposed: &TQueries,
+    target: &[u8],
+    k: u8,
+    results: &mut Vec<MatchInfo>,
+) {
     let nq = transposed.n_queries;
     if nq == 0 {
-        return Vec::new();
+        return;
     }
     let m = transposed.query_length;
     assert!(m > 0 && m <= 32, "query length must be 1..=32");
-    search_simd_with_positions(transposed, target, k)
+    search_simd_with_positions(transposed, target, k, results)
 }
 
 /// Build peqs vectors from precomputed masks.
@@ -376,7 +382,12 @@ fn search_simd(transposed: &TQueries, target: &[u8], k: u8) -> Vec<i32> {
 /// SIMD search with position tracking - optimized for minimal overhead.
 /// Tracks ALL positions where score <= k by incrementally collecting matches.
 #[inline(always)]
-fn search_simd_with_positions(transposed: &TQueries, target: &[u8], k: u8) -> Vec<MatchInfo> {
+fn search_simd_with_positions(
+    transposed: &TQueries,
+    target: &[u8],
+    k: u8,
+    results: &mut Vec<MatchInfo>,
+) {
     let nq = transposed.n_queries;
     let m = transposed.query_length;
 
@@ -398,8 +409,8 @@ fn search_simd_with_positions(transposed: &TQueries, target: &[u8], k: u8) -> Ve
     let mask_vec = i32x8::splat(high_bit as i32);
     let k_v = i32x8::splat(k as i32);
 
-    let estimated_matches = (target.len() * nq / 10).max(nq);
-    let mut result = Vec::with_capacity(estimated_matches);
+    // let estimated_matches = (target.len() * nq / 10).max(nq);
+    // let mut result = Vec::with_capacity(estimated_matches);
 
     for (pos_counter, &tb) in target.iter().enumerate() {
         let encoded = get_encoded(tb);
@@ -462,7 +473,7 @@ fn search_simd_with_positions(transposed: &TQueries, target: &[u8], k: u8) -> Ve
 
                 for (i, &score) in score_arr[..(end - base)].iter().enumerate() {
                     if score <= k as i32 {
-                        result.push(MatchInfo {
+                        results.push(MatchInfo {
                             query_idx: base + i,
                             cost: score,
                             pos: pos_counter as i32,
@@ -472,8 +483,6 @@ fn search_simd_with_positions(transposed: &TQueries, target: &[u8], k: u8) -> Ve
             }
         }
     }
-
-    result
 }
 
 const INVALID_IUPAC: u8 = 255;
@@ -633,7 +642,8 @@ mod tests {
         //             012345678901234567
         //                      ATG at pos 9-11 (ends at 11)
         let transposed = TQueries::new(&queries);
-        let result = mini_search_with_positions(&transposed, t, 4);
+        let mut result = Vec::new();
+        mini_search_with_positions(&transposed, t, 4, &mut result);
 
         // Should find at least one match
         assert!(!result.is_empty());
@@ -651,7 +661,8 @@ mod tests {
         //        012345678901234
         // ATG at positions 0-2 (ends at 2), 6-8 (ends at 8), 12-14 (ends at 14)
         let transposed = TQueries::new(&queries);
-        let result = mini_search_with_positions(&transposed, t, 0);
+        let mut result = Vec::new();
+        mini_search_with_positions(&transposed, t, 0, &mut result);
 
         // Should find all 3 exact matches
         let exact_matches: Vec<_> = result
@@ -673,7 +684,8 @@ mod tests {
         let transposed = TQueries::new(&queries);
 
         let result_basic = mini_search(&transposed, t, 4);
-        let result_pos = mini_search_with_positions(&transposed, t, 4);
+        let mut result_pos = Vec::new();
+        mini_search_with_positions(&transposed, t, 4, &mut result_pos);
 
         // mini_search returns minimum cost per query
         // mini_search_with_positions returns all matches
@@ -695,7 +707,8 @@ mod tests {
         let queries = vec![q];
         let t = b"CCCCCCCCCCCCC";
         let transposed = TQueries::new(&queries);
-        let result = mini_search_with_positions(&transposed, t, 1);
+        let mut result = Vec::new();
+        mini_search_with_positions(&transposed, t, 1, &mut result);
 
         // Should have no matches for query 0 with cost <= 1
         let matches_q0: Vec<_> = result.iter().filter(|m| m.query_idx == 0).collect();
@@ -712,7 +725,8 @@ mod tests {
         ];
         let t = b"AAGGGGTTTTCCCC";
         let transposed = TQueries::new(&queries);
-        let result = mini_search_with_positions(&transposed, t, 2);
+        let mut result = Vec::new();
+        mini_search_with_positions(&transposed, t, 2, &mut result);
 
         // All queries should have at least one match with k=2
         for query_idx in 0..4 {

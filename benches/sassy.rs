@@ -1,4 +1,4 @@
-use mini_myers::{mini_search, TQueries};
+use mini_myers::{mini_search, mini_search_with_positions, TQueries};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use sassy::profiles::{Dna, Iupac};
@@ -95,7 +95,7 @@ fn run_bench_round(
 
     let mut searcher = Searcher::<Iupac>::new_fwd();
     let transposed = TQueries::new(&queries);
-    let mut results = Vec::new();
+    let mut mini_search_buffer = Vec::new();
 
     let sassy_total = time_iterations(iterations, || {
         for q in &queries {
@@ -105,7 +105,7 @@ fn run_bench_round(
     });
 
     let mini_total = time_iterations(iterations, || {
-        let result = mini_search(&transposed, &target, k);
+        let result = mini_search_with_positions(&transposed, &target, k, &mut mini_search_buffer);
         black_box(&result);
     });
 

@@ -7,8 +7,6 @@ text with at most `k` edits.
 ### When to use
 - Short queries (`<=32`)
 - Search for multiple of `8` queries
-- Don't need positions
-- Supports DNA IUPAC characters (A, C, G, T, N, ...)
 
 **Most likely you want something like [sassy](https://github.com/RagnarGrootKoerkamp/sassy/)**, this is a faster prefilter to run before sassy but does not return the positions, nor works for longer queries.
 
@@ -36,15 +34,18 @@ println!("Result: {:?}", result);
 
 #### Benchmark
 Note that `mini_myers` and `sassy` are not directly comparable. 
-While `mini_myers` just tells us if something is present below `k`, `sassy` 
-will provide the positions, tracebacks, and cigars etc. 
+`mini_seaerch` just tells us if something is present below `k`,
+`mini_search_with_positions` does return the match locations similar
+to `sassy` though without traceback. 
 
-| Profile | Query Len | µs/query (mini_myers) | µs/query (sassy) |
-|---------|-----------|-----------------------|------------------|
-| IUPAC   |   24      | 23.5                  | 50.7             |
-| IUPAC   |   32      | 23.9                  | 51.3             |
-| DNA     |   24      | 23.2                  | 52.2             |
-| DNA     |   32      | 23.1                  | 50.4             |
+| Profile | Query Len | µs/query (mini_myers) | µs/query (sassy) | Function                      |
+|---------|-----------|-----------------------|------------------|-------------------------------|
+| IUPAC   |   24      | 23.5                  | 50.7             | mini_search                   |
+| IUPAC   |   32      | 23.9                  | 51.3             | mini_search                   |
+| DNA     |   24      | 23.2                  | 52.2             | mini_search                   |
+| DNA     |   32      | 23.1                  | 50.4             | mini_search                   |
+| IUPAC   |   24      | 32.3                  | 54.0             | mini_search_with_positions    |
+| IUPAC   |   32      | 32.8                  | 53.2             | mini_search_with_positions    |
 
 _Searching for 32 queries in a 100K DNA string with k=4._
 
