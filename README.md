@@ -17,7 +17,8 @@ Mainly for [Barbell](https://github.com/rickbeeloo/barbell) as a faster pre-filt
 #### What it does
 We compare each character of the queries against a single text character at the time using SIMD.
 Then we track the lowest cost 
-we see along the entire text and report the cost when below the cut-off `k`, or `-1` if above `k`. 
+we see along the entire text and report the cost when below the cut-off `k`, or `-1` if above `k` for 
+`mini_search`, at a ~5% overhead we can also track the positions in `mini_search_positions`. 
 
 --- 
 
