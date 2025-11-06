@@ -42,7 +42,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut results = Vec::new();
 
     let target_lens = vec![1_000, 10_000, 50_000, 1_000_000];
-    let query_lens = vec![24, 32];
+    let query_lens = vec![24];
     let ks = vec![4];
     let iterations = 100;
     let n_queries = 192;
@@ -54,7 +54,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     run_bench_round(&mut rng, target_len, *query_len, iterations, *k, n_queries);
 
                 println!(
-                    "target={:<7} query={:<2} k={} | mini_myers: {:>8.4} ms/batch ({:>8.4} µs/query), sassy: {:>8.4} ms/batch ({:>8.4} µs/query)",
+                    "target={:<7} query={:<2} k={} | mini_search_with_positions: {:>8.4} ms/batch ({:>8.4} µs/query), sassy: {:>8.4} ms/batch ({:>8.4} µs/query)",
                     target_len,
                     query_len,
                     k,
@@ -96,7 +96,7 @@ fn run_bench_round(
     let mut searcher = Searcher::<Iupac>::new_fwd();
     let transposed = TQueries::new(&queries);
     let mut state = MyersSearchState::new();
-    //let mut results = Vec::new();
+    let mut results = Vec::new();
 
     let sassy_total = time_iterations(iterations, || {
         for q in &queries {
@@ -106,7 +106,7 @@ fn run_bench_round(
     });
 
     let mini_total: Duration = time_iterations(iterations, || {
-        let results = mini_search(&mut state, &transposed, &target, k, None);
+        mini_search_with_positions(&mut state, &transposed, &target, k, None, &mut results);
         black_box(&results);
     });
 

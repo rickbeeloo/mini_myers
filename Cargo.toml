@@ -1,6 +1,6 @@
 [package]
 name = "mini_myers"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 authors = ["Rick Beeloo <biobeeloo@gmail.com>"]
 license = "MIT"
@@ -22,7 +22,6 @@ path = "src/main.rs"
 [dependencies]
 rand = "0.8.5"
 wide = "0.8.1"
-
 
 [dev-dependencies]
 sassy = "0.1.6"

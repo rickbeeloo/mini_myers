@@ -76,22 +76,26 @@ In the example above, this would give a cost of `3 * 0.5 = 1.5`
 
 #### Benchmark
 Note that `mini_myers` and `sassy` are not directly comparable. 
-`mini_seaerch` just tells us if something is present below `k`,
+`mini_seaerch` just tells us if something is present below `k`, and
 `mini_search_with_positions` does return the match locations similar
-to `sassy` though without traceback. Here we have a batch of 32 which 
-is ideal for `mini_myers` as well.
+to `sassy` *but* without traceback and local minima scan. Here we search for 192 sequences, 
+a multiple of 8, which is ideal for `mini_myers` as well.
 
-| Profile | Query Len | µs/query (mini_myers) | µs/query (sassy) | Function                      |
-|---------|-----------|-----------------------|------------------|-------------------------------|
-| IUPAC   |   24      | 23.5                  | 50.7             | `mini_search`                   |
-| IUPAC   |   32      | 23.9                  | 51.3             | `mini_search`                   |
-| DNA     |   24      | 23.2                  | 52.2             | `mini_search`                   |
-| DNA     |   32      | 23.1                  | 50.4             | `mini_search`                   |
-| IUPAC   |   24      | 32.3                  | 54.0             | `mini_search_with_positions`    |
-| IUPAC   |   32      | 32.8                  | 53.2             | `mini_search_with_positions`    |
+| Profile | Query Len | Target Len | µs/query (mini_myers) | µs/query (sassy) | Function                    |
+|---------|-----------|------------|-----------------------|------------------|-----------------------------|
+| IUPAC   |   24      |   1,000    |  0.23                 |   0.85           | `mini_search`               |
+| IUPAC   |   24      |  10,000    |  2.29                 |   5.46           | `mini_search`               |
+| IUPAC   |   24      |  50,000    | 11.91                 |  25.22           | `mini_search`               |
+| IUPAC   |   24      | 100,000    | 24.21                 |  52.67           | `mini_search`               |
+| IUPAC   |   32      | 100,000    | 23.9                  | 51.3             | `mini_search`               |
+| IUPAC   |   24      |   1,000    |  0.43                 |   0.83           | `mini_search_with_positions`|
+| IUPAC   |   24      |  10,000    |  3.02                 |   5.47           | `mini_search_with_positions`|
+| IUPAC   |   24      |  50,000    | 15.29                 |  25.11           | `mini_search_with_positions`|
+| IUPAC   |   24      |1,000,000   |299.53                 | 496.75           | `mini_search_with_positions`|
 
-_Searching for 32 queries in a 100K DNA string with k=4._
 
-Run the bench using `cargo bench --bench sassy`.
+Run the bench using `cargo bench --bench sassy`, now has `mini_search_with_positions` but you can replace 
+the call with `mini_search` to bench without positions. 
+
 
 
