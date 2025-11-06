@@ -239,6 +239,8 @@ pub(crate) fn search_simd_core(
     let k_scaled = (k as i32) << scale_shift;
     let inv_scale = 1.0f32 / (scale as f32);
 
+    // todo: we have some constants still that don't have to be in the
+    // functions themselves
     let all_ones = i32x8::splat(!0);
     let zero_v = i32x8::splat(0);
     let one_v = i32x8::splat(1);
@@ -392,6 +394,7 @@ fn search_simd_with_positions_core(
         }
     }
 
+    // todo: overhang part is still quite ugly
     if alpha_scaled < scale {
         for trailing in 1..=m {
             let adjust_vec = i32x8::splat((trailing as i32) * extra_penalty_scaled);
