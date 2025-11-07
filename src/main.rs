@@ -24,7 +24,7 @@ fn main() {
         queries.push(generate_random_dna(query_len));
     }
     let mut searcher = Searcher::<U32, Scan>::new();
-    let encoded = searcher.encode(&queries);
+    let encoded = searcher.encode(&queries, false);
     let target = generate_random_dna(10_000_000);
     let results = searcher.search(&encoded, &target, 4, None);
     black_box(&results);

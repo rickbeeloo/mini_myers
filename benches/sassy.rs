@@ -43,9 +43,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     let target_lens = vec![1_000, 10_000, 50_000];
     let query_lens = vec![32];
-    let ks = vec![6];
+    let ks = vec![8];
     let iterations = 100;
-    let n_queries = 200;
+    let n_queries = 100;
 
     // Regular search benchmarks
     for target_len in &target_lens {
@@ -97,11 +97,11 @@ fn run_bench_round(
         queries.push(generate_random_dna(rng, query_len));
     }
 
-    let mut searcher = Searcher::<Iupac>::new_fwd();
+    let mut searcher = Searcher::<Iupac>::new_rc();
 
     let mut mini_scanner = mini_searcher::<U32, Scan>::new();
     let mut mini_searcher = mini_searcher::<U32, Positions>::new();
-    let encoded = mini_searcher.encode(&queries);
+    let encoded = mini_searcher.encode(&queries, true);
 
     // Benchmark sassy
     let sassy_total = time_iterations(iterations, || {
@@ -159,68 +159,6 @@ fn run_bench_round(
     };
 
     (mini_search_result, mini_pos_result, sassy_result)
-}
-
-fn generate_target_with_matches(
-    rng: &mut StdRng,
-    target_len: usize,
-    query: &[u8],
-    n_matches: usize,
-    k: u8,
-) -> Vec<u8> {
-    let mut target = generate_random_dna(rng, target_len);
-
-    // Ensure we have enough space to insert matches
-    let min_spacing = query.len() + (k as usize) * 2;
-    let max_insert_pos = target_len.saturating_sub(query.len());
-
-    if max_insert_pos < n_matches * min_spacing {
-        // If target is too small, just return random DNA
-        return target;
-    }
-
-    // Insert matches at random positions, ensuring they don't overlap
-    let mut inserted_positions = Vec::new();
-    for _ in 0..n_matches {
-        let mut attempts = 0;
-        let pos = loop {
-            let candidate_pos = rng.gen_range(0..=max_insert_pos);
-            // Check if this position is far enough from other insertions
-            if inserted_positions
-                .iter()
-                .all(|&p: &usize| candidate_pos.abs_diff(p) >= min_spacing)
-            {
-                break candidate_pos;
-            }
-            attempts += 1;
-            if attempts > 100 {
-                // Give up if we can't find a good position, use a random one
-                break rng.gen_range(0..=max_insert_pos);
-            }
-        };
-
-        // Insert the query (possibly with some edits to match k)
-        for (i, &base) in query.iter().enumerate() {
-            if pos + i < target.len() {
-                // With probability based on k, introduce a mismatch
-                let should_mismatch = rng.gen_bool((k as f64) / (query.len() as f64));
-                if should_mismatch && k > 0 {
-                    // Insert a different base
-                    let bases = [b'A', b'T', b'G', b'C'];
-                    let mut new_base = bases[rng.gen_range(0..bases.len())];
-                    while new_base == base {
-                        new_base = bases[rng.gen_range(0..bases.len())];
-                    }
-                    target[pos + i] = new_base;
-                } else {
-                    target[pos + i] = base;
-                }
-            }
-        }
-        inserted_positions.push(pos);
-    }
-
-    target
 }
 
 fn generate_random_dna(rng: &mut StdRng, len: usize) -> Vec<u8> {

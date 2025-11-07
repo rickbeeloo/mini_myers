@@ -3,6 +3,12 @@ use crate::tqueries::TQueries;
 use std::marker::PhantomData;
 use wide::CmpEq;
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Strand {
+    Fwd,
+    Rc,
+}
+
 /// Match information including position and cost for a query.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct MatchInfo {
@@ -12,6 +18,8 @@ pub struct MatchInfo {
     pub cost: f32,
     /// Position in target where best match ends (0-based)
     pub pos: i32,
+    /// Strand
+    pub strand: Strand,
 }
 
 /// Marker type for scan mode (returns minimum cost per query).
@@ -49,7 +57,7 @@ impl SearchMode for Positions {
 /// // Create a searcher for scan mode with U32 backend
 /// let mut searcher = Searcher::<U32, Scan>::new();
 /// let queries = vec![b"ATG".to_vec(), b"TTG".to_vec()];
-/// let encoded = searcher.encode(&queries);
+/// let encoded = searcher.encode(&queries, false);
 /// let target = b"CCCTCGCCCCCCATGCCCCC";
 /// let results = searcher.search(&encoded, target, 4, None);
 /// assert_eq!(results, vec![0.0, 1.0]);
@@ -71,8 +79,13 @@ impl<B: SimdBackend, M: SearchMode> Searcher<B, M> {
     /// Encodes queries for searching.
     ///
     /// All queries must have the same length.
-    pub fn encode(&self, queries: &[Vec<u8>]) -> TQueries<B> {
-        TQueries::new(queries)
+    ///
+    /// # Arguments
+    ///
+    /// * `queries` - Slice of query sequences
+    /// * `include_rc` - If true, also includes reverse complements
+    pub fn encode(&self, queries: &[Vec<u8>], include_rc: bool) -> TQueries<B> {
+        TQueries::new(queries, include_rc)
     }
 
     /// Searches for encoded queries in the target sequence.
@@ -110,7 +123,7 @@ impl<B: SimdBackend, M: SearchMode> Default for Searcher<B, M> {
 
 /// Trait for collecting search results during the search loop (internal).
 trait ResultCollector<B: SimdBackend> {
-    fn init(&mut self, nq: usize, m: usize, initial_adjusted: i64);
+    fn init(&mut self, nq: usize, m: usize, initial_adjusted: i64, n_original_queries: usize);
     fn collect_match(
         &mut self,
         adjusted: B::Simd,
@@ -119,9 +132,16 @@ trait ResultCollector<B: SimdBackend> {
         pos: i32,
         k_scaled_vec: B::Simd,
         inv_scale: f32,
+        n_original_queries: usize,
     );
     fn update_best(&mut self, adjusted: B::Simd, block_idx: usize);
-    fn finalize(&mut self, nq: usize, k_scaled_vec: B::Simd, inv_scale: f32) -> Self::Output;
+    fn finalize(
+        &mut self,
+        nq: usize,
+        k_scaled_vec: B::Simd,
+        inv_scale: f32,
+        n_original_queries: usize,
+    ) -> Self::Output;
     type Output;
 }
 
@@ -130,7 +150,7 @@ struct ScanCollector<B: SimdBackend> {
 }
 
 impl<B: SimdBackend> ResultCollector<B> for ScanCollector<B> {
-    fn init(&mut self, nq: usize, _m: usize, initial_adjusted: i64) {
+    fn init(&mut self, nq: usize, _m: usize, initial_adjusted: i64, _n_original_queries: usize) {
         let vectors_in_block = nq.div_ceil(B::LANES);
         let initial_adj_v = B::splat_from_i64(initial_adjusted);
         self.best_adjusted.resize(vectors_in_block, initial_adj_v);
@@ -146,6 +166,7 @@ impl<B: SimdBackend> ResultCollector<B> for ScanCollector<B> {
         _pos: i32,
         _k_scaled_vec: B::Simd,
         _inv_scale: f32,
+        _n_original_queries: usize,
     ) {
     }
 
@@ -157,10 +178,16 @@ impl<B: SimdBackend> ResultCollector<B> for ScanCollector<B> {
         }
     }
 
-    fn finalize(&mut self, nq: usize, k_scaled_vec: B::Simd, inv_scale: f32) -> Self::Output {
+    fn finalize(
+        &mut self,
+        nq: usize,
+        k_scaled_vec: B::Simd,
+        inv_scale: f32,
+        n_original_queries: usize,
+    ) -> Self::Output {
         let all_ones = B::splat_all_ones();
         let neg_mask = B::splat_scalar(B::MAX_POSITIVE);
-        let mut result = vec![-1.0f32; nq];
+        let mut result = vec![-1.0f32; n_original_queries];
 
         for (block_idx, &min_adj) in self.best_adjusted.iter().enumerate() {
             let mask = all_ones ^ B::simd_gt(min_adj, k_scaled_vec);
@@ -172,7 +199,16 @@ impl<B: SimdBackend> ResultCollector<B> for ScanCollector<B> {
 
             for (lane_idx, &val) in selected_slice[..(end - base)].iter().enumerate() {
                 if val != B::MAX_POSITIVE {
-                    result[base + lane_idx] = B::scalar_to_f32(val) * inv_scale;
+                    let query_idx = base + lane_idx;
+                    let cost = B::scalar_to_f32(val) * inv_scale;
+
+                    // Map to original query index (handles RC if present)
+                    let orig_idx = query_idx % n_original_queries;
+
+                    // Keep minimum across forward and RC
+                    if result[orig_idx] < 0.0 || cost < result[orig_idx] {
+                        result[orig_idx] = cost;
+                    }
                 }
             }
         }
@@ -205,7 +241,7 @@ impl QueryState {
 }
 
 impl<B: SimdBackend> ResultCollector<B> for PositionsCollector<B> {
-    fn init(&mut self, nq: usize, _m: usize, _initial_adjusted: i64) {
+    fn init(&mut self, nq: usize, _m: usize, _initial_adjusted: i64, _n_original_queries: usize) {
         self.results.clear();
         if self.states.len() < nq {
             self.states.resize_with(nq, QueryState::default);
@@ -224,6 +260,7 @@ impl<B: SimdBackend> ResultCollector<B> for PositionsCollector<B> {
         pos: i32,
         k_scaled_vec: B::Simd,
         inv_scale: f32,
+        n_original_queries: usize,
     ) {
         let all_ones = B::splat_all_ones();
         let match_mask = all_ones ^ B::simd_gt(adjusted, k_scaled_vec);
@@ -248,10 +285,20 @@ impl<B: SimdBackend> ResultCollector<B> for PositionsCollector<B> {
                 if B::scalar_to_i64(score_scaled) <= k_scaled_i64 {
                     let query_idx = base + i;
                     let cost = B::scalar_to_f32(score_scaled) * inv_scale;
+
+                    // Determine original query index and strand
+                    let orig_idx = query_idx % n_original_queries;
+                    let strand = if query_idx >= n_original_queries {
+                        Strand::Rc
+                    } else {
+                        Strand::Fwd
+                    };
+
                     let match_info = MatchInfo {
-                        query_idx,
+                        query_idx: orig_idx,
                         cost,
                         pos,
+                        strand,
                     };
                     self.handle_match(match_info);
                 }
@@ -262,7 +309,13 @@ impl<B: SimdBackend> ResultCollector<B> for PositionsCollector<B> {
     #[inline(always)]
     fn update_best(&mut self, _adjusted: B::Simd, _block_idx: usize) {}
 
-    fn finalize(&mut self, nq: usize, _k_scaled_vec: B::Simd, _inv_scale: f32) -> Self::Output {
+    fn finalize(
+        &mut self,
+        nq: usize,
+        _k_scaled_vec: B::Simd,
+        _inv_scale: f32,
+        _n_original_queries: usize,
+    ) -> Self::Output {
         for state in self.states.iter_mut().take(nq) {
             if let Some(candidate) = state.candidate.take() {
                 self.results.push(candidate);
@@ -445,8 +498,9 @@ fn search<B: SimdBackend, C: ResultCollector<B>>(
     alpha: Option<f32>,
 ) -> C::Output {
     let nq = encoded.n_queries;
+    let n_original_queries = encoded.n_original_queries;
     if nq == 0 {
-        return collector.finalize(0, B::splat_zero(), 1.0);
+        return collector.finalize(0, B::splat_zero(), 1.0, n_original_queries);
     }
     let m = encoded.query_length;
     assert!(
@@ -462,7 +516,7 @@ fn search<B: SimdBackend, C: ResultCollector<B>>(
     let initial_adjusted = (m as i64) * (alpha_scaled as i64);
 
     state.reset_for_positions(nq, m);
-    collector.init(nq, m, initial_adjusted);
+    collector.init(nq, m, initial_adjusted, n_original_queries);
     search_core(
         state,
         collector,
@@ -472,13 +526,14 @@ fn search<B: SimdBackend, C: ResultCollector<B>>(
         alpha_scaled,
         SCALE,
         SCALE_SHIFT,
+        n_original_queries,
     );
 
     let k_scaled = (k as i32) << SCALE_SHIFT;
     let k_scaled_vec = B::splat_from_i64(k_scaled as i64);
     let inv_scale = 1.0f32 / (SCALE as f32);
 
-    collector.finalize(nq, k_scaled_vec, inv_scale)
+    collector.finalize(nq, k_scaled_vec, inv_scale, n_original_queries)
 }
 
 #[derive(Copy, Clone)]
@@ -536,6 +591,7 @@ fn search_core<B: SimdBackend, C: ResultCollector<B>>(
     alpha_scaled: i32,
     scale: i32,
     scale_shift: u32,
+    n_original_queries: usize,
 ) {
     let nq = transposed.n_queries;
     let m = transposed.query_length;
@@ -586,7 +642,15 @@ fn search_core<B: SimdBackend, C: ResultCollector<B>>(
                 // Update best scores (for scan mode)
                 collector.update_best(adjusted, block_idx);
                 // Collect matches (for positions mode)
-                collector.collect_match(adjusted, block_idx, nq, pos, k_scaled_vec, inv_scale);
+                collector.collect_match(
+                    adjusted,
+                    block_idx,
+                    nq,
+                    pos,
+                    k_scaled_vec,
+                    inv_scale,
+                    n_original_queries,
+                );
             }
         }
     }
@@ -612,7 +676,15 @@ fn search_core<B: SimdBackend, C: ResultCollector<B>>(
                     collector.update_best(adjusted, block_idx);
 
                     // Collect matches (for positions mode)
-                    collector.collect_match(adjusted, block_idx, nq, pos, k_scaled_vec, inv_scale);
+                    collector.collect_match(
+                        adjusted,
+                        block_idx,
+                        nq,
+                        pos,
+                        k_scaled_vec,
+                        inv_scale,
+                        n_original_queries,
+                    );
                 }
             }
         }
@@ -621,14 +693,14 @@ fn search_core<B: SimdBackend, C: ResultCollector<B>>(
 
 #[cfg(test)]
 mod tests {
-    use super::{Positions, Scan, Searcher};
+    use super::{Positions, Scan, Searcher, Strand};
     use crate::backend::{U32, U64};
 
     #[test]
     fn test_iupac_query_matches_standard_target() {
         let mut searcher = Searcher::<U32, Scan>::new();
         let queries = vec![b"n".to_vec()];
-        let encoded = searcher.encode(&queries);
+        let encoded = searcher.encode(&queries, false);
         assert_eq!(searcher.search(&encoded, b"A", 0, None), vec![0.0]);
         assert_eq!(searcher.search(&encoded, b"a", 0, None), vec![0.0]);
     }
@@ -637,7 +709,7 @@ mod tests {
     fn test_iupac_target_matches_standard_query() {
         let mut searcher = Searcher::<U32, Scan>::new();
         let queries = vec![b"A".to_vec()];
-        let encoded = searcher.encode(&queries);
+        let encoded = searcher.encode(&queries, false);
         assert_eq!(searcher.search(&encoded, b"N", 0, None), vec![0.0]);
         assert_eq!(searcher.search(&encoded, b"n", 0, None), vec![0.0]);
     }
@@ -646,7 +718,7 @@ mod tests {
     fn test_iupac_mismatch_requires_edit() {
         let mut searcher = Searcher::<U32, Scan>::new();
         let queries = vec![b"R".to_vec()];
-        let encoded = searcher.encode(&queries);
+        let encoded = searcher.encode(&queries, false);
         assert_eq!(searcher.search(&encoded, b"C", 0, None), vec![-1.0]);
         assert_eq!(searcher.search(&encoded, b"C", 1, None), vec![1.0]);
         assert_eq!(searcher.search(&encoded, b"c", 1, None), vec![1.0]);
@@ -657,14 +729,14 @@ mod tests {
     fn test_invalid_query_panics() {
         let searcher = Searcher::<U32, Scan>::new();
         let queries = vec![b"AZ".to_vec()];
-        let _ = searcher.encode(&queries);
+        let _ = searcher.encode(&queries, false);
     }
 
     #[test]
     fn test_mini_search() {
         let mut searcher = Searcher::<U32, Scan>::new();
         let queries = vec![b"ATG".to_vec()];
-        let encoded = searcher.encode(&queries);
+        let encoded = searcher.encode(&queries, false);
         let result = searcher.search(&encoded, b"CCCCCCCCCATGCCCCC", 4, None);
         assert_eq!(result, vec![0.0]);
     }
@@ -673,7 +745,7 @@ mod tests {
     fn test_double_search() {
         let mut searcher = Searcher::<U32, Scan>::new();
         let queries = vec![b"ATG".to_vec(), b"TTG".to_vec()];
-        let encoded = searcher.encode(&queries);
+        let encoded = searcher.encode(&queries, false);
         let result = searcher.search(&encoded, b"CCCTTGCCCCCCATGCCCCC", 4, None);
         assert_eq!(result, vec![0.0, 0.0]);
     }
@@ -682,7 +754,7 @@ mod tests {
     fn test_edit() {
         let mut searcher = Searcher::<U32, Scan>::new();
         let queries = vec![b"ATCAGA".to_vec()];
-        let encoded = searcher.encode(&queries);
+        let encoded = searcher.encode(&queries, false);
 
         // 1 edit
         let result = searcher.search(&encoded, b"ATCTGA", 4, None);
@@ -705,7 +777,7 @@ mod tests {
     fn test_lowest_edits_returned() {
         let mut searcher = Searcher::<U32, Scan>::new();
         let queries = vec![b"GGGCATCGATGAC".to_vec()];
-        let encoded = searcher.encode(&queries);
+        let encoded = searcher.encode(&queries, false);
         let target = b"CCCCCCCGGGCATCGATGACCCCCCCCCCCCCCCGGGCTTCGATGAC";
         let result = searcher.search(&encoded, target, 4, None);
         assert_eq!(result, vec![0.0]);
@@ -716,14 +788,14 @@ mod tests {
     fn test_error_unequal_lengths() {
         let searcher = Searcher::<U32, Scan>::new();
         let queries = vec![b"GGGCATCGATGAC".to_vec(), b"AAA".to_vec()];
-        let _ = searcher.encode(&queries);
+        let _ = searcher.encode(&queries, false);
     }
 
     #[test]
     fn read_example() {
         let mut searcher = Searcher::<U32, Scan>::new();
         let queries = vec![b"ATG".to_vec(), b"TTG".to_vec()];
-        let encoded = searcher.encode(&queries);
+        let encoded = searcher.encode(&queries, false);
         let target = b"CCCTCGCCCCCCATGCCCCC";
         let result = searcher.search(&encoded, target, 4, None);
         println!("Result: {:?}", result);
@@ -734,7 +806,7 @@ mod tests {
     fn test_mini_search_with_positions() {
         let mut searcher = Searcher::<U32, Positions>::new();
         let queries = vec![b"ATG".to_vec()];
-        let encoded = searcher.encode(&queries);
+        let encoded = searcher.encode(&queries, false);
         let target = b"CCCCCCCCCATGCCCCC";
         let result = searcher.search(&encoded, target, 4, None);
 
@@ -751,7 +823,7 @@ mod tests {
     fn test_positions_multiple_occurrences() {
         let mut searcher = Searcher::<U32, Positions>::new();
         let queries = vec![b"ATG".to_vec()];
-        let encoded = searcher.encode(&queries);
+        let encoded = searcher.encode(&queries, false);
         let target = b"ATGCCCATGCCCATG";
         let result = searcher.search(&encoded, target, 0, None);
 
@@ -770,7 +842,7 @@ mod tests {
     fn test_positions_local_minima_only() {
         let mut searcher = Searcher::<U32, Positions>::new();
         let queries = vec![vec![b'A'; 6]];
-        let encoded = searcher.encode(&queries);
+        let encoded = searcher.encode(&queries, false);
 
         let mut target = Vec::new();
         target.extend_from_slice(b"TTT");
@@ -789,7 +861,7 @@ mod tests {
     fn test_positions_plateau_keeps_rightmost() {
         let mut searcher = Searcher::<U32, Positions>::new();
         let queries = vec![vec![b'A'; 6]];
-        let encoded = searcher.encode(&queries);
+        let encoded = searcher.encode(&queries, false);
 
         let mut target = Vec::new();
         target.extend_from_slice(b"TTT");
@@ -811,7 +883,7 @@ mod tests {
     fn test_positions_plateau_at_end_flushes() {
         let mut searcher = Searcher::<U32, Positions>::new();
         let queries = vec![vec![b'A'; 6]];
-        let encoded = searcher.encode(&queries);
+        let encoded = searcher.encode(&queries, false);
 
         let mut target = Vec::new();
         target.extend_from_slice(b"TTT");
@@ -832,7 +904,7 @@ mod tests {
     fn test_local_min_double_match() {
         let mut searcher = Searcher::<U32, Positions>::new();
         let queries = vec![vec![b'A'; 6]];
-        let encoded = searcher.encode(&queries);
+        let encoded = searcher.encode(&queries, false);
 
         let mut target = std::iter::repeat_n(b'T', 100).collect::<Vec<_>>();
         // Insert query at position 10 and 50
@@ -853,8 +925,8 @@ mod tests {
 
         let mut scan_searcher = Searcher::<U32, Scan>::new();
         let mut pos_searcher = Searcher::<U32, Positions>::new();
-        let encoded_scan = scan_searcher.encode(&queries);
-        let encoded_pos = pos_searcher.encode(&queries);
+        let encoded_scan = scan_searcher.encode(&queries, false);
+        let encoded_pos = pos_searcher.encode(&queries, false);
 
         let result_scan = scan_searcher.search(&encoded_scan, target, 4, None);
         let result_pos = pos_searcher.search(&encoded_pos, target, 4, None);
@@ -879,7 +951,7 @@ mod tests {
     fn test_positions_no_match() {
         let mut searcher = Searcher::<U32, Positions>::new();
         let queries = vec![b"AAAAA".to_vec()];
-        let encoded = searcher.encode(&queries);
+        let encoded = searcher.encode(&queries, false);
         let result = searcher.search(&encoded, b"CCCCCCCCCCCCC", 1, None);
 
         // Should have no matches for query 0 with cost <= 1
@@ -896,7 +968,7 @@ mod tests {
             b"GGGG".to_vec(),
             b"CCCC".to_vec(),
         ];
-        let encoded = searcher.encode(&queries);
+        let encoded = searcher.encode(&queries, false);
         let result = searcher.search(&encoded, b"AAGGGGTTTTCCCC", 2, None);
 
         // All queries should have at least one match with k=2
@@ -916,7 +988,7 @@ mod tests {
     fn test_overhang_half_penalty() {
         let mut searcher = Searcher::<U32, Scan>::new();
         let queries = vec![b"AC".to_vec()];
-        let encoded = searcher.encode(&queries);
+        let encoded = searcher.encode(&queries, false);
         let result = searcher.search(&encoded, b"A", 1, Some(0.5));
         assert_eq!(result.len(), 1);
         assert!(
@@ -930,7 +1002,7 @@ mod tests {
     fn test_overhang_matches_standard_when_alpha_one() {
         let mut searcher = Searcher::<U32, Scan>::new();
         let queries = vec![b"ATG".to_vec()];
-        let encoded = searcher.encode(&queries);
+        let encoded = searcher.encode(&queries, false);
         let target = b"CCCCCCCCCATGCCCCC";
         let standard = searcher.search(&encoded, target, 4, None);
         let overhang = searcher.search(&encoded, target, 4, Some(1.0));
@@ -944,7 +1016,7 @@ mod tests {
     fn test_positions_overhang() {
         let mut searcher = Searcher::<U32, Positions>::new();
         let queries = vec![b"AC".to_vec()];
-        let encoded = searcher.encode(&queries);
+        let encoded = searcher.encode(&queries, false);
         let results = searcher.search(&encoded, b"A", 1, Some(0.5));
         assert!(!results.is_empty());
         let min_cost_entry = results
@@ -959,7 +1031,7 @@ mod tests {
     fn test_longer_overhang_left() {
         let mut searcher = Searcher::<U32, Positions>::new();
         let queries = vec![b"AAACCC".to_vec()];
-        let encoded = searcher.encode(&queries);
+        let encoded = searcher.encode(&queries, false);
         let results = searcher.search(&encoded, b"CCCGGGGGGGG", 4, Some(0.5));
         // Get minimum cost match
         let min_cost = results
@@ -977,7 +1049,7 @@ mod tests {
     fn test_longer_overhang_right() {
         let mut searcher = Searcher::<U32, Positions>::new();
         let queries = vec![b"AAACCC".to_vec()];
-        let encoded = searcher.encode(&queries);
+        let encoded = searcher.encode(&queries, false);
         let results = searcher.search(&encoded, b"GGGGGAAA", 4, Some(0.5));
         // Get minimum cost match
         let min_cost = results
@@ -995,7 +1067,7 @@ mod tests {
     fn test_overhang_with_positions() {
         let mut searcher = Searcher::<U32, Positions>::new();
         let queries = vec![b"AAACCC".to_vec()];
-        let encoded = searcher.encode(&queries);
+        let encoded = searcher.encode(&queries, false);
         let results = searcher.search(&encoded, b"GGGGGAAA", 4, Some(0.5));
         // Get minimum cost match
         let _min_cost = results
@@ -1010,7 +1082,7 @@ mod tests {
     fn test_searcher_u32_scan() {
         let mut searcher = Searcher::<U32, Scan>::new();
         let queries = vec![b"ATG".to_vec(), b"TTG".to_vec()];
-        let encoded = searcher.encode(&queries);
+        let encoded = searcher.encode(&queries, false);
         let target = b"CCCTCGCCCCCCATGCCCCC";
         let results = searcher.search(&encoded, target, 4, None);
 
@@ -1023,7 +1095,7 @@ mod tests {
     fn test_searcher_u64_scan() {
         let mut searcher = Searcher::<U64, Scan>::new();
         let queries = vec![b"ATG".to_vec(), b"TTG".to_vec()];
-        let encoded = searcher.encode(&queries);
+        let encoded = searcher.encode(&queries, false);
         let target = b"CCCTCGCCCCCCATGCCCCC";
         let results = searcher.search(&encoded, target, 4, None);
 
@@ -1036,7 +1108,7 @@ mod tests {
     fn test_searcher_u32_positions() {
         let mut searcher = Searcher::<U32, Positions>::new();
         let queries = vec![b"ATG".to_vec()];
-        let encoded = searcher.encode(&queries);
+        let encoded = searcher.encode(&queries, false);
         let target = b"ATGCCCATGCCCATG";
         let results = searcher.search(&encoded, target, 0, None);
 
@@ -1057,7 +1129,7 @@ mod tests {
         let mut searcher = Searcher::<U64, Positions>::new();
         let long_query = repeat_n(b'A', 64).collect::<Vec<u8>>();
         let queries = vec![long_query.clone()];
-        let encoded = searcher.encode(&queries);
+        let encoded = searcher.encode(&queries, false);
         let mut target = vec![b'C'; 200];
         let insert_pos = 100;
         target.splice(insert_pos..insert_pos, long_query.iter().cloned());
@@ -1075,7 +1147,7 @@ mod tests {
     fn test_searcher_with_overhang() {
         let mut searcher = Searcher::<U32, Scan>::new();
         let queries = vec![b"AC".to_vec()];
-        let encoded = searcher.encode(&queries);
+        let encoded = searcher.encode(&queries, false);
         let target = b"A";
 
         // Test with overhang penalty
@@ -1092,10 +1164,140 @@ mod tests {
             b"ATGATCATCTACGACTACTACCAATGCTAGCT".to_vec(),
             //12345678901234567890123456789012
         ];
-        let encoded = searcher.encode(&queries);
+        let encoded = searcher.encode(&queries, false);
         let target = b"CCCCCCCCCCCcATGATCATCTACGACTACTACCAATGCTAGCT";
         let results = searcher.search(&encoded, target, 0, None);
         assert_eq!(results.len(), 1);
         assert_eq!(results[0], 0.0);
+    }
+
+    #[test]
+    fn test_rc_scan_forward_match() {
+        let mut searcher = Searcher::<U32, Scan>::new();
+        let queries = vec![b"ATG".to_vec()];
+        let encoded = searcher.encode(&queries, true);
+        let target = b"CCCCCCCCCATGCCCCC";
+        let results = searcher.search(&encoded, target, 0, None);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0], 0.0); // Should find forward match
+    }
+
+    #[test]
+    fn test_rc_scan_reverse_match() {
+        let mut searcher = Searcher::<U32, Scan>::new();
+        let queries = vec![b"ATG".to_vec()];
+        let encoded = searcher.encode(&queries, true);
+        // RC of ATG is CAT
+        let target = b"CCCCCCCCCATCCCCC";
+        let results = searcher.search(&encoded, target, 0, None);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0], 0.0); // Should find RC match
+    }
+
+    #[test]
+    fn test_rc_scan_both_matches() {
+        let mut searcher = Searcher::<U32, Scan>::new();
+        let queries = vec![b"ATG".to_vec()];
+        let encoded = searcher.encode(&queries, true);
+        // Target has both ATG and CAT (RC of ATG)
+        let target = b"ATGCCCCCCAT";
+        let results = searcher.search(&encoded, target, 0, None);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0], 0.0); // Should find minimum (which is 0.0 for both)
+    }
+
+    #[test]
+    fn test_rc_scan_prefers_better_match() {
+        let mut searcher = Searcher::<U32, Scan>::new();
+        let queries = vec![b"ATG".to_vec()];
+        let encoded = searcher.encode(&queries, true);
+        // Forward has 1 mismatch (TTG), RC (CAT) has exact match
+        let target = b"TTGCCCCCCAT";
+        let results = searcher.search(&encoded, target, 2, None);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0], 0.0); // Should prefer RC's exact match over forward's 1-edit
+    }
+
+    #[test]
+    fn test_rc_positions_forward_match() {
+        let mut searcher = Searcher::<U32, Positions>::new();
+        let queries = vec![b"ATG".to_vec()];
+        let encoded = searcher.encode(&queries, true);
+        let target = b"CCCCCCCCCATGCCCCC";
+        let results = searcher.search(&encoded, target, 0, None);
+
+        let exact_matches: Vec<_> = results.iter().filter(|m| m.cost == 0.0).collect();
+        assert!(!exact_matches.is_empty());
+        assert_eq!(exact_matches[0].query_idx, 0);
+        assert_eq!(exact_matches[0].strand, Strand::Fwd);
+        assert_eq!(exact_matches[0].pos, 11);
+    }
+
+    #[test]
+    fn test_rc_positions_reverse_match() {
+        let mut searcher = Searcher::<U32, Positions>::new();
+        let queries = vec![b"ATG".to_vec()];
+        let encoded = searcher.encode(&queries, true);
+        // RC of ATG is CAT
+        let target = b"CCCCCCCCCATCCCCC";
+        let results = searcher.search(&encoded, target, 0, None);
+
+        let exact_matches: Vec<_> = results.iter().filter(|m| m.cost == 0.0).collect();
+        assert!(!exact_matches.is_empty());
+        assert_eq!(exact_matches[0].query_idx, 0);
+        assert_eq!(exact_matches[0].strand, Strand::Rc);
+        assert_eq!(exact_matches[0].pos, 10); // CAT ends at position 10
+    }
+
+    #[test]
+    fn test_rc_positions_both_matches() {
+        let mut searcher = Searcher::<U32, Positions>::new();
+        let queries = vec![b"ATG".to_vec()];
+        let encoded = searcher.encode(&queries, true);
+        // Target has both ATG and CAT (RC of ATG)
+        let target = b"ATGCCCCCCAT";
+        let results = searcher.search(&encoded, target, 0, None);
+
+        let exact_matches: Vec<_> = results.iter().filter(|m| m.cost == 0.0).collect();
+        assert_eq!(exact_matches.len(), 2); // Should find both
+
+        // Check that we have one Fwd and one Rc match
+        let fwd_count = exact_matches
+            .iter()
+            .filter(|m| m.strand == Strand::Fwd)
+            .count();
+        let rc_count = exact_matches
+            .iter()
+            .filter(|m| m.strand == Strand::Rc)
+            .count();
+        assert_eq!(fwd_count, 1);
+        assert_eq!(rc_count, 1);
+    }
+
+    #[test]
+    fn test_rc_multiple_queries() {
+        let mut searcher = Searcher::<U32, Scan>::new();
+        let queries = vec![b"ATG".to_vec(), b"TTG".to_vec()];
+        let encoded = searcher.encode(&queries, true);
+        // Target has CAT (RC of ATG) and CAA (RC of TTG)
+        let target = b"CATCCCCCCAA";
+        let results = searcher.search(&encoded, target, 0, None);
+
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0], 0.0); // ATG found via RC (CAT)
+        assert_eq!(results[1], 0.0); // TTG found via RC (CAA)
+    }
+
+    #[test]
+    fn test_rc_disabled() {
+        let mut searcher = Searcher::<U32, Scan>::new();
+        let queries = vec![b"ATG".to_vec()];
+        let encoded = searcher.encode(&queries, false);
+        // Only has RC (CAT), should not match when RC disabled
+        let target = b"CCCCCCCCCATCCCCC";
+        let results = searcher.search(&encoded, target, 0, None);
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0], -1.0); // No match found
     }
 }

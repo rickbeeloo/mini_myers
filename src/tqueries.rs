@@ -26,8 +26,10 @@ pub struct TQueries<B: SimdBackend> {
     pub vectors: Vec<Vec<u8x32>>,
     /// Length of each query (all queries must have the same length)
     pub query_length: usize,
-    /// Number of queries
+    /// Number of queries (including reverse complements if used)
     pub n_queries: usize,
+    /// Number of original queries (before adding reverse complements)
+    pub n_original_queries: usize,
     /// Number of blocks of 32 queries needed
     pub n_blocks: usize,
     /// Precomputed peq bitvectors keyed by IUPAC mask (0..=15)
@@ -78,6 +80,7 @@ impl<B: SimdBackend> TQueries<B> {
     ///
     /// * `queries` - A slice of byte vectors, where each vector represents one query sequence.
     ///   Each query must contain valid IUPAC nucleotide codes.
+    /// * `include_rc` - If true, also includes reverse complements of all queries
     ///
     /// # Examples
     ///
@@ -86,9 +89,9 @@ impl<B: SimdBackend> TQueries<B> {
     /// use mini_myers::TQueries;
     ///
     /// let queries = vec![b"ATG".to_vec(), b"TTG".to_vec()];
-    /// let transposed = TQueries::<U32>::new(&queries);
+    /// let transposed = TQueries::<U32>::new(&queries, false);
     /// ```
-    pub fn new(queries: &[Vec<u8>]) -> Self {
+    pub fn new(queries: &[Vec<u8>], include_rc: bool) -> Self {
         assert!(!queries.is_empty(), "No queries provided");
         let query_length = queries[0].len();
         assert!(
@@ -96,13 +99,26 @@ impl<B: SimdBackend> TQueries<B> {
             "All queries must have the same length"
         );
 
-        let n_queries = queries.len();
+        let n_original_queries = queries.len();
         assert!(query_length > 0, "Query length must be greater than zero");
         assert!(
             query_length <= B::LIMB_BITS,
             "Query length must be <= {} for this backend",
             B::LIMB_BITS
         );
+
+        // Build combined queries list (original + reverse complements if requested)
+        let all_queries: Vec<Vec<u8>> = if include_rc {
+            let mut combined = queries.to_vec();
+            for q in queries {
+                combined.push(crate::iupac::reverse_complement(q));
+            }
+            combined
+        } else {
+            queries.to_vec()
+        };
+
+        let n_queries = all_queries.len();
 
         // Calculate how many blocks of 32 queries we need
         let n_blocks = n_queries.div_ceil(32);
@@ -111,7 +127,7 @@ impl<B: SimdBackend> TQueries<B> {
         let mut vector_data: Vec<Vec<[u8; 32]>> = vec![vec![[0u8; 32]; n_blocks]; query_length];
         let mut peq_masks: [Vec<u64>; IUPAC_MASKS] = std::array::from_fn(|_| vec![0u64; n_queries]);
 
-        for (qi, q) in queries.iter().enumerate() {
+        for (qi, q) in all_queries.iter().enumerate() {
             let block_idx = qi / 32;
             let idx_in_block = qi % 32;
 
@@ -150,6 +166,7 @@ impl<B: SimdBackend> TQueries<B> {
             vectors,
             query_length,
             n_queries,
+            n_original_queries,
             n_blocks,
             peq_masks,
             peqs,

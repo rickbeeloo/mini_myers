@@ -25,7 +25,7 @@
 //! // Create a searcher for scan mode with U32 backend
 //! let mut searcher = Searcher::<U32, Scan>::new();
 //! let queries = vec![b"ATG".to_vec(), b"TTG".to_vec()];
-//! let encoded = searcher.encode(&queries);
+//! let encoded = searcher.encode(&queries, false);
 //! let target = b"CCCTCGCCCCCCATGCCCCC";
 //!
 //! // Scan mode: get minimum cost per query
@@ -34,13 +34,13 @@
 //!
 //! // Positions mode: get all match positions
 //! let mut pos_searcher = Searcher::<U32, Positions>::new();
-//! let encoded = pos_searcher.encode(&queries);
+//! let encoded = pos_searcher.encode(&queries, false);
 //! let results = pos_searcher.search(&encoded, target, 4, None);
 //! println!("Found {} matches", results.len());
 //!
 //! // Use U64 backend for longer queries (up to 64 nucleotides)
 //! let mut searcher64 = Searcher::<U64, Scan>::new();
-//! let encoded = searcher64.encode(&queries);
+//! let encoded = searcher64.encode(&queries, false);
 //! let results = searcher64.search(&encoded, target, 4, None);
 //! ```
 //!
