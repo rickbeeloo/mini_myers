@@ -1,7 +1,7 @@
 use std::convert::TryInto;
 use std::ops::{Add, BitAnd, BitOr, BitXor, Shl, Shr, Sub};
 
-use wide::{i32x8, i64x4, CmpEq, CmpGt};
+use wide::{u32x8, u64x4, CmpEq};
 
 pub trait SimdBackend: Copy + 'static {
     type Simd: Copy
@@ -16,8 +16,7 @@ pub trait SimdBackend: Copy + 'static {
         + Shr<i32, Output = Self::Simd>
         + Shl<u32, Output = Self::Simd>
         + Shr<u32, Output = Self::Simd>
-        + CmpEq<Output = Self::Simd>
-        + CmpGt<Output = Self::Simd>;
+        + CmpEq<Output = Self::Simd>;
 
     type Scalar: Copy + PartialEq;
     type LaneArray: AsRef<[Self::Scalar]> + AsMut<[Self::Scalar]> + Copy + Default;
@@ -48,6 +47,7 @@ pub trait SimdBackend: Copy + 'static {
     fn from_array(arr: Self::LaneArray) -> Self::Simd;
     fn min(lhs: Self::Simd, rhs: Self::Simd) -> Self::Simd;
     fn blend(mask: Self::Simd, t: Self::Simd, f: Self::Simd) -> Self::Simd;
+    fn simd_gt(lhs: Self::Simd, rhs: Self::Simd) -> Self::Simd;
 }
 
 /// Default backend using 32-bit limbs with eight SIMD lanes (AVX2-friendly).
@@ -55,38 +55,38 @@ pub trait SimdBackend: Copy + 'static {
 pub struct I32x8Backend;
 
 impl SimdBackend for I32x8Backend {
-    type Simd = i32x8;
-    type Scalar = i32;
-    type LaneArray = [i32; 8];
+    type Simd = u32x8;
+    type Scalar = u32;
+    type LaneArray = [u32; 8];
 
     const LANES: usize = 8;
     const LIMB_BITS: usize = 32;
-    const CARRY_SHIFT: u32 = 31;
-    const MAX_POSITIVE: Self::Scalar = i32::MAX;
+    const CARRY_SHIFT: u32 = 32;
+    const MAX_POSITIVE: Self::Scalar = u32::MAX;
 
     #[inline(always)]
     fn splat_all_ones() -> Self::Simd {
-        i32x8::splat(!0)
+        u32x8::splat(!0)
     }
 
     #[inline(always)]
     fn splat_zero() -> Self::Simd {
-        i32x8::splat(0)
+        u32x8::splat(0)
     }
 
     #[inline(always)]
     fn splat_one() -> Self::Simd {
-        i32x8::splat(1)
+        u32x8::splat(1)
     }
 
     #[inline(always)]
     fn splat_scalar(value: Self::Scalar) -> Self::Simd {
-        i32x8::splat(value)
+        u32x8::splat(value)
     }
 
     #[inline(always)]
     fn scalar_from_i64(value: i64) -> Self::Scalar {
-        value.try_into().expect("value does not fit in i32")
+        value.try_into().expect("value does not fit in u32")
     }
 
     #[inline(always)]
@@ -96,7 +96,7 @@ impl SimdBackend for I32x8Backend {
 
     #[inline(always)]
     fn mask_word_to_scalar(word: u64) -> Self::Scalar {
-        word as i32
+        word as u32
     }
 
     #[inline(always)]
@@ -111,7 +111,7 @@ impl SimdBackend for I32x8Backend {
 
     #[inline(always)]
     fn from_array(arr: Self::LaneArray) -> Self::Simd {
-        i32x8::new(arr)
+        u32x8::new(arr)
     }
 
     #[inline(always)]
@@ -123,6 +123,20 @@ impl SimdBackend for I32x8Backend {
     fn blend(mask: Self::Simd, t: Self::Simd, f: Self::Simd) -> Self::Simd {
         mask.blend(t, f)
     }
+
+    // Thanks Ragnar
+    // https://github.com/RagnarGrootKoerkamp/sassy/blob/0772487a8f08c37f5742aa6217f4744312b38a8e/src/profiles.rs#L50-L67
+    #[inline(always)]
+    fn simd_gt(lhs: Self::Simd, rhs: Self::Simd) -> Self::Simd {
+        unsafe {
+            use std::mem::transmute;
+            use wide::{i32x8, CmpGt};
+            let a: i32x8 = transmute(lhs);
+            let b: i32x8 = transmute(rhs);
+            let mask = i32x8::splat((1u32 << 31) as i32);
+            transmute(CmpGt::simd_gt(a ^ mask, b ^ mask))
+        }
+    }
 }
 
 /// Backend using 64-bit limbs with four SIMD lanes, useful for very long queries.
@@ -130,48 +144,48 @@ impl SimdBackend for I32x8Backend {
 pub struct I64x4Backend;
 
 impl SimdBackend for I64x4Backend {
-    type Simd = i64x4;
-    type Scalar = i64;
-    type LaneArray = [i64; 4];
+    type Simd = u64x4;
+    type Scalar = u64;
+    type LaneArray = [u64; 4];
 
     const LANES: usize = 4;
     const LIMB_BITS: usize = 64;
-    const CARRY_SHIFT: u32 = 63;
-    const MAX_POSITIVE: Self::Scalar = i64::MAX;
+    const CARRY_SHIFT: u32 = 64;
+    const MAX_POSITIVE: Self::Scalar = u64::MAX;
 
     #[inline(always)]
     fn splat_all_ones() -> Self::Simd {
-        i64x4::splat(!0)
+        u64x4::splat(!0)
     }
 
     #[inline(always)]
     fn splat_zero() -> Self::Simd {
-        i64x4::splat(0)
+        u64x4::splat(0)
     }
 
     #[inline(always)]
     fn splat_one() -> Self::Simd {
-        i64x4::splat(1)
+        u64x4::splat(1)
     }
 
     #[inline(always)]
     fn splat_scalar(value: Self::Scalar) -> Self::Simd {
-        i64x4::splat(value)
+        u64x4::splat(value)
     }
 
     #[inline(always)]
     fn scalar_from_i64(value: i64) -> Self::Scalar {
-        value
+        value as u64
     }
 
     #[inline(always)]
     fn scalar_to_i64(value: Self::Scalar) -> i64 {
-        value
+        value as i64
     }
 
     #[inline(always)]
     fn mask_word_to_scalar(word: u64) -> Self::Scalar {
-        word as i64
+        word
     }
 
     #[inline(always)]
@@ -186,7 +200,7 @@ impl SimdBackend for I64x4Backend {
 
     #[inline(always)]
     fn from_array(arr: Self::LaneArray) -> Self::Simd {
-        i64x4::new(arr)
+        u64x4::new(arr)
     }
 
     #[inline(always)]
@@ -197,6 +211,20 @@ impl SimdBackend for I64x4Backend {
     #[inline(always)]
     fn blend(mask: Self::Simd, t: Self::Simd, f: Self::Simd) -> Self::Simd {
         mask.blend(t, f)
+    }
+
+    // Thanks Ragnar
+    // https://github.com/RagnarGrootKoerkamp/sassy/blob/0772487a8f08c37f5742aa6217f4744312b38a8e/src/profiles.rs#L50-L67
+    #[inline(always)]
+    fn simd_gt(lhs: Self::Simd, rhs: Self::Simd) -> Self::Simd {
+        unsafe {
+            use std::mem::transmute;
+            use wide::{i64x4, CmpGt};
+            let a: i64x4 = transmute(lhs);
+            let b: i64x4 = transmute(rhs);
+            let mask = i64x4::splat((1u64 << 63) as i64);
+            transmute(CmpGt::simd_gt(a ^ mask, b ^ mask))
+        }
     }
 }
 

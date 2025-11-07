@@ -42,10 +42,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut results = Vec::new();
 
     let target_lens = vec![1_000, 10_000, 50_000, 100_000, 1_000_000];
-    let query_lens = vec![64];
-    let ks = vec![14];
+    let query_lens = vec![32];
+    let ks = vec![6];
     let iterations = 100;
-    let n_queries = 4 * 4;
+    let n_queries = 200;
 
     for target_len in target_lens {
         for query_len in &query_lens {
@@ -98,8 +98,8 @@ fn run_bench_round(
 
     let mut searcher = Searcher::<Iupac>::new_fwd();
 
-    let mut mini_scanner = mini_searcher::<U64, Scan>::new();
-    let mut mini_searcher = mini_searcher::<U64, Positions>::new();
+    let mut mini_scanner = mini_searcher::<U32, Scan>::new();
+    let mut mini_searcher = mini_searcher::<U32, Positions>::new();
     let encoded = mini_searcher.encode(&queries);
 
     // Benchmark sassy

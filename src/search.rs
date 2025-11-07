@@ -1,7 +1,7 @@
 use crate::backend::SimdBackend;
 use crate::tqueries::TQueries;
 use std::marker::PhantomData;
-use wide::{CmpEq, CmpGt};
+use wide::CmpEq;
 
 /// Match information including position and cost for a query.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -37,7 +37,7 @@ impl SearchMode for Positions {
 ///
 /// # Type Parameters
 ///
-/// * `B` - Backend type: `U32` (i32x8, up to 32-bit queries) or `U64` (i64x4, up to 64-bit queries)
+/// * `B` - Backend type: `U32` (u32x8, up to 32-bit queries) or `U64` (u64x4, up to 64-bit queries)
 /// * `M` - Mode: `Scan` (minimum cost per query) or `Positions` (all match positions)
 ///
 /// # Examples
@@ -163,7 +163,7 @@ impl<B: SimdBackend> ResultCollector<B> for ScanCollector<B> {
         let mut result = vec![-1.0f32; nq];
 
         for (block_idx, &min_adj) in self.best_adjusted.iter().enumerate() {
-            let mask = all_ones ^ min_adj.simd_gt(k_scaled_vec);
+            let mask = all_ones ^ B::simd_gt(min_adj, k_scaled_vec);
             let selected = B::blend(mask, min_adj, neg_mask);
             let base = block_idx * B::LANES;
             let end = (base + B::LANES).min(nq);
@@ -203,7 +203,7 @@ impl<B: SimdBackend> ResultCollector<B> for PositionsCollector<B> {
         inv_scale: f32,
     ) {
         let all_ones = B::splat_all_ones();
-        let match_mask = all_ones ^ adjusted.simd_gt(k_scaled_vec);
+        let match_mask = all_ones ^ B::simd_gt(adjusted, k_scaled_vec);
         let match_bits_arr = B::to_array(match_mask);
         let match_bits = match_bits_arr.as_ref();
 
