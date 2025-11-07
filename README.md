@@ -53,7 +53,7 @@ let results = pos_searcher.search(&encoded, target, 4, None);
 println!("Found {} matches", results.len());
 
 // Use U64 backend for longer queries (up to 64 nucleotides)
-// that is 4 queries in parlalel (4*32)
+// that is 4 queries in parlalel (4*64)
 let mut searcher64 = Searcher::<U64, Scan>::new();
 let encoded = searcher64.encode(&queries);
 let results = searcher64.search(&encoded, target, 4, None);
