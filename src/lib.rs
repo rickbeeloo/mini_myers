@@ -1,36 +1,47 @@
 //! # mini_myers
 //!
 //! SIMD implementation of the Myers bitvector algorithm specifically to test
-//! whether short queries (<=32 nucleotides) are present in a longer DNA sequence with at most `k` edits.
+//! whether short queries (<=64 nucleotides) are present in a longer DNA sequence with at most `k` edits.
 //!
 //! ## Features
 //!
-//! - **SIMD-accelerated**: Uses the `wide` crate for stable SIMD processing of multiple queries.
-//! - **Batch processing**: Process up to 32 queries simultaneously
+//! - **Batch processing**: Process 8 or 16 queries simultaneously depending on their length
+//! - **Flexible backends**: Choose between `U32` (8 lanes) or `U64` (4 lanes) for different query lengths
+//! - **Multiple modes**: Scan for minimum costs or find all match positions
 //!
 //! ## When to use
 //!
-//! - Short queries (≤32 nucleotides)
+//! - Short queries (≤32 nucleotides with U32 backend, ≤64 with U64)
 //! - Multiple queries to search (best performance with multiples of 8)
-//! - Only need edit distance, not positions
+//! - Need edit distance or match positions
 //! - Supports DNA IUPAC codes (A, C, G, T, N, etc)
 //!
 //! ## Example
 //!
 //! ```rust
-//! use mini_myers::{TQueries, mini_search, MyersSearchState};
+//! use mini_myers::{Searcher, Scan, Positions};
+//! use mini_myers::backend::{U32, U64};
 //!
-//! // Prepare queries
+//! // Create a searcher for scan mode with U32 backend
+//! let mut searcher = Searcher::<U32, Scan>::new();
 //! let queries = vec![b"ATG".to_vec(), b"TTG".to_vec()];
-//! let transposed = TQueries::new(&queries);
-//!
-//! // Search in target sequence
+//! let encoded = searcher.encode(&queries);
 //! let target = b"CCCTCGCCCCCCATGCCCCC";
-//! let mut state = MyersSearchState::new();
-//! let result = mini_search(&mut state, &transposed, target, 4, None);
 //!
-//! // Result: [0, 1] means ATG has 0 edits, TTG has 1 edit
-//! assert_eq!(result, vec![0.0, 1.0]);
+//! // Scan mode: get minimum cost per query
+//! let results = searcher.search(&encoded, target, 4, None);
+//! assert_eq!(results, vec![0.0, 1.0]);
+//!
+//! // Positions mode: get all match positions
+//! let mut pos_searcher = Searcher::<U32, Positions>::new();
+//! let encoded = pos_searcher.encode(&queries);
+//! let results = pos_searcher.search(&encoded, target, 4, None);
+//! println!("Found {} matches", results.len());
+//!
+//! // Use U64 backend for longer queries (up to 64 nucleotides)
+//! let mut searcher64 = Searcher::<U64, Scan>::new();
+//! let encoded = searcher64.encode(&queries);
+//! let results = searcher64.search(&encoded, target, 4, None);
 //! ```
 //!
 //! ## Performance
@@ -42,15 +53,16 @@
 // These traits are needed for both versions (cmp_eq/simd_eq and cmp_gt/simd_gt)
 
 pub mod constant {
-    pub const SIMD_LANES: usize = 8;
     pub const IUPAC_MASKS: usize = 16;
     pub const INVALID_IUPAC: u8 = 255;
 }
 
+pub mod backend;
 mod iupac;
 pub mod search;
 pub mod tqueries;
 
 // Re-export commonly used items at the crate root
-pub use search::{mini_search, mini_search_with_positions, MatchInfo, MyersSearchState};
+pub use backend::{I32x8Backend, I64x4Backend, SimdBackend, U32, U64};
+pub use search::{MatchInfo, Positions, Scan, Searcher};
 pub use tqueries::TQueries;

@@ -1,7 +1,7 @@
-use mini_myers::{mini_search, mini_search_with_positions, MyersSearchState, TQueries};
+use mini_myers::{Positions, Scan, Searcher as mini_searcher, TQueries, U32};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
-use sassy::profiles::{Dna, Iupac};
+use sassy::profiles::Iupac;
 use sassy::Searcher;
 use std::fs::{self, File};
 use std::hint::black_box;
@@ -50,22 +50,25 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     for target_len in target_lens {
         for query_len in &query_lens {
             for k in &ks {
-                let (mini, sassy) =
+                let (mini_search_result, mini_pos_result, sassy_result) =
                     run_bench_round(&mut rng, target_len, *query_len, iterations, *k, n_queries);
 
                 println!(
-                    "target={:<7} query={:<2} k={} | mini_search_with_positions: {:>8.4} ms/batch ({:>8.4} µs/query), sassy: {:>8.4} ms/batch ({:>8.4} µs/query)",
+                    "target={:<7} query={:<2} k={} | mini_search: {:>8.4} ms/batch ({:>8.4} µs/query), mini_search_with_positions: {:>8.4} ms/batch ({:>8.4} µs/query), sassy: {:>8.4} ms/batch ({:>8.4} µs/query)",
                     target_len,
                     query_len,
                     k,
-                    mini.avg_batch_ms(),
-                    mini.avg_per_query_us(),
-                    sassy.avg_batch_ms(),
-                    sassy.avg_per_query_us()
+                    mini_search_result.avg_batch_ms(),
+                    mini_search_result.avg_per_query_us(),
+                    mini_pos_result.avg_batch_ms(),
+                    mini_pos_result.avg_per_query_us(),
+                    sassy_result.avg_batch_ms(),
+                    sassy_result.avg_per_query_us()
                 );
 
-                results.push(mini);
-                results.push(sassy);
+                results.push(mini_search_result);
+                results.push(mini_pos_result);
+                results.push(sassy_result);
             }
         }
     }
@@ -86,7 +89,7 @@ fn run_bench_round(
     iterations: usize,
     k: u8,
     n_queries: usize,
-) -> (BenchResult, BenchResult) {
+) -> (BenchResult, BenchResult, BenchResult) {
     let target = generate_random_dna(rng, target_len);
     let mut queries = Vec::new();
     for _ in 0..n_queries {
@@ -94,10 +97,12 @@ fn run_bench_round(
     }
 
     let mut searcher = Searcher::<Iupac>::new_fwd();
-    let transposed = TQueries::new(&queries);
-    let mut state = MyersSearchState::new();
-    let mut results = Vec::new();
 
+    let mut mini_scanner = mini_searcher::<U32, Scan>::new();
+    let mut mini_searcher = mini_searcher::<U32, Positions>::new();
+    let encoded = mini_searcher.encode(&queries);
+
+    // Benchmark sassy
     let sassy_total = time_iterations(iterations, || {
         for q in &queries {
             let matches = searcher.search(q, &target, k as usize);
@@ -105,12 +110,41 @@ fn run_bench_round(
         }
     });
 
-    let mini_total: Duration = time_iterations(iterations, || {
-        mini_search_with_positions(&mut state, &transposed, &target, k, None, &mut results);
-        black_box(&results);
+    // Benchmark mini_search (without positions)
+    let mini_search_total = time_iterations(iterations, || {
+        let result = mini_scanner.search(&encoded, &target, k, None);
+        black_box(result);
+    });
+
+    // Benchmark mini_search_with_positions
+    let mini_pos_total = time_iterations(iterations, || {
+        let result = mini_searcher.search(&encoded, &target, k, None);
+        black_box(result);
     });
 
     let queries_per_iter = queries.len();
+
+    let mini_search_result = BenchResult {
+        tool: "mini_search",
+        target_len,
+        query_len,
+        k,
+        iterations,
+        queries_per_iter,
+        avg_batch_ns: average_per_batch(mini_search_total, iterations),
+        avg_per_query_ns: average_per_query(mini_search_total, iterations, queries_per_iter),
+    };
+
+    let mini_pos_result = BenchResult {
+        tool: "mini_search_with_positions",
+        target_len,
+        query_len,
+        k,
+        iterations,
+        queries_per_iter,
+        avg_batch_ns: average_per_batch(mini_pos_total, iterations),
+        avg_per_query_ns: average_per_query(mini_pos_total, iterations, queries_per_iter),
+    };
 
     let sassy_result = BenchResult {
         tool: "sassy",
@@ -123,18 +157,7 @@ fn run_bench_round(
         avg_per_query_ns: average_per_query(sassy_total, iterations, queries_per_iter),
     };
 
-    let mini_result = BenchResult {
-        tool: "mini_myers",
-        target_len,
-        query_len,
-        k,
-        iterations,
-        queries_per_iter,
-        avg_batch_ns: average_per_batch(mini_total, iterations),
-        avg_per_query_ns: average_per_query(mini_total, iterations, queries_per_iter),
-    };
-
-    (mini_result, sassy_result)
+    (mini_search_result, mini_pos_result, sassy_result)
 }
 
 fn generate_random_dna(rng: &mut StdRng, len: usize) -> Vec<u8> {

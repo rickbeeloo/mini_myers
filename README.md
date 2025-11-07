@@ -29,33 +29,36 @@ we see along the entire text and report the cost when below the cut-off `k`, or 
 
 #### Without position tracking
 This will just return the lowest edits found (below `k`) for each query. 
-```rust
-use mini_myers::{TQueries, mini_search, MyersSearchState};
 
-let queries = vec![b"ATG".to_vec(), b"TTG".to_vec()];
-let transposed = TQueries::new(&queries);
-let target = b"CCCTCGCCCCCCATGCCCCC";
-let mut state = MyersSearchState::new(); // to re-use allocs
-let result = mini_search(&transposed, target, 4, None);
-println!("Result: {:?}", result); 
-// [0,1] (ATG = 0 edits, TTG = 1 edit)
-```
-
-#### With position tracking
 
 ```rust
-use mini_myers::{TQueries, mini_search_with_positions, MyersSearchState};
+use mini_myers::{Searcher, Scan, Positions};
+use mini_myers::backend::{U32, U64};
 
+// Create a searcher for scan mode with U32 backend
+// that is 8 queries in parallel (8*32)
+let mut searcher = Searcher::<U32, Scan>::new();
 let queries = vec![b"ATG".to_vec(), b"TTG".to_vec()];
-let transposed = TQueries::new(&queries);
+let encoded = searcher.encode(&queries);
 let target = b"CCCTCGCCCCCCATGCCCCC";
-let mut results = Vec::new();
-let mut state = MyersSearchState::new(); // to re-use allocs
-mini_search_with_positions(&mut state, &transposed, target, 1, None, &mut results);
-println!("Result: {:?}", results);
-// Result: [MatchInfo { query_idx: 1, cost: 1, pos: 5 } ...
+
+// Scan mode: get minimum cost per query
+let results = searcher.search(&encoded, target, 4, None);
+assert_eq!(results, vec![0.0, 1.0]);
+
+// Positions mode: get all match positions
+let mut pos_searcher = Searcher::<U32, Positions>::new();
+let encoded = pos_searcher.encode(&queries);
+let results = pos_searcher.search(&encoded, target, 4, None);
+println!("Found {} matches", results.len());
+
+// Use U64 backend for longer queries (up to 64 nucleotides)
+// that is 4 queries in parlalel (4*32)
+let mut searcher64 = Searcher::<U64, Scan>::new();
+let encoded = searcher64.encode(&queries);
+let results = searcher64.search(&encoded, target, 4, None);
 ```
-This returns *all* positions, which is not ideal perhaps, sassy returns the local minima position.
+
 
 #### With "overhang" enabled
 Like in [sassy](https://github.com/RagnarGrootKoerkamp/sassy/) `mini_myers` can apply 
@@ -67,7 +70,7 @@ a reduced penalty for characters "hanging over" the target sequence, i.e.:
 ```
 You can enable overhang by changing `None` in the above commands to `Some(overhang_cost)`, i.e. `Some(0.5)`:
 ```rust
-let result = mini_search_with_positions(&transposed, target, 4, &mut results, Some(0.5));
+let results = searcher64.search(&encoded, target, 4, Some(0.5));
 ```
 In the example above, this would give a cost of `3 * 0.5 = 1.5`
 

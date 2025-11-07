@@ -1,4 +1,5 @@
-use mini_myers::{mini_search, MyersSearchState, TQueries};
+use mini_myers::backend::U32;
+use mini_myers::{Scan, Searcher};
 
 #[allow(dead_code)]
 fn generate_random_dna(l: usize) -> Vec<u8> {
@@ -22,10 +23,9 @@ fn main() {
     for _ in 0..n_queries {
         queries.push(generate_random_dna(query_len));
     }
-    let transposed = TQueries::new(&queries);
+    let mut searcher = Searcher::<U32, Scan>::new();
+    let encoded = searcher.encode(&queries);
     let target = generate_random_dna(10_000_000);
-    //let mut results = Vec::new();
-    let mut state = MyersSearchState::new();
-    let results = mini_search(&mut state, &transposed, &target, 4, None);
+    let results = searcher.search(&encoded, &target, 4, None);
     black_box(&results);
 }
