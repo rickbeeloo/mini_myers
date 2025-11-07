@@ -918,4 +918,18 @@ mod tests {
         assert_eq!(results.len(), 1);
         assert!((results[0] - 0.5).abs() < 1e-6);
     }
+
+    #[test]
+    fn test_full_32_bit_coverage() {
+        let mut searcher = Searcher::<U32, Scan>::new();
+        let queries = vec![
+            b"ATGATCATCTACGACTACTACCAATGCTAGCT".to_vec(),
+            //12345678901234567890123456789012
+        ];
+        let encoded = searcher.encode(&queries);
+        let target = b"CCCCCCCCCCCcATGATCATCTACGACTACTACCAATGCTAGCT";
+        let results = searcher.search(&encoded, target, 0, None);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0], 0.0);
+    }
 }
