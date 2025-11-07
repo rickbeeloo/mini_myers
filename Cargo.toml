@@ -1,6 +1,6 @@
 [package]
 name = "mini_myers"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2021"
 authors = ["Rick Beeloo <biobeeloo@gmail.com>"]
 license = "MIT"
