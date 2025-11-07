@@ -279,7 +279,6 @@ impl<B: SimdBackend> ResultCollector<B> for PositionsCollector<B> {
 impl<B: SimdBackend> PositionsCollector<B> {
     #[inline(always)]
     fn handle_match(&mut self, match_info: MatchInfo) {
-        const EPS: f32 = 1e-6;
         let query_idx = match_info.query_idx;
         if query_idx >= self.states.len() {
             return;
@@ -299,13 +298,13 @@ impl<B: SimdBackend> PositionsCollector<B> {
         }
 
         if let Some(prev) = state.prev_cost {
-            if match_info.cost + EPS < prev {
+            if match_info.cost + f32::EPSILON < prev {
                 state.candidate = Some(match_info);
-            } else if (match_info.cost - prev).abs() <= EPS {
+            } else if (match_info.cost - prev).abs() <= f32::EPSILON {
                 match &state.candidate {
                     Some(current) => {
-                        if (match_info.cost - current.cost).abs() <= EPS
-                            || match_info.cost + EPS < current.cost
+                        if (match_info.cost - current.cost).abs() <= f32::EPSILON
+                            || match_info.cost + f32::EPSILON < current.cost
                         {
                             state.candidate = Some(match_info);
                         }
@@ -314,7 +313,7 @@ impl<B: SimdBackend> PositionsCollector<B> {
                         state.candidate = Some(match_info);
                     }
                 }
-            } else if match_info.cost > prev + EPS {
+            } else if match_info.cost > prev + f32::EPSILON {
                 if let Some(candidate) = state.candidate.take() {
                     self.results.push(candidate);
                 }
