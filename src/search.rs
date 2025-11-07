@@ -1312,7 +1312,6 @@ mod tests {
             rng.gen_range(r)
         }
 
-        // Use closures to ensure rng is only borrowed mutably in one call-chain at a time
         let mut pattern_lens = {
             let mut rng = rand::thread_rng();
             (10..=32)
@@ -1322,7 +1321,6 @@ mod tests {
 
         let mut text_lens = {
             let mut rng = rand::thread_rng();
-            // Avoid multiple mutable borrows of rng by collecting each Vec separately, then joining them.
             let mut out = (10..20).collect::<Vec<_>>();
             out.extend((0..10).map(|_| random_range(10..100, &mut rng)));
             out.extend((0..10).map(|_| random_range(100..1000, &mut rng)));
@@ -1428,7 +1426,7 @@ mod tests {
                 // Also rc search, should still find the same match
                 let matches = searcher.search(&rc_encoded, &text, edits as u8, None);
 
-                eprintln!("matches {matches:?}");
+                eprintln!("rc matches {matches:?}");
                 let m = matches.iter().find(|m| {
                     m.pos
                         .abs_diff((expected_end_idx as u32).try_into().unwrap())
