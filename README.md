@@ -27,7 +27,7 @@ we see along the entire text and report the cost when below the cut-off `k`, or 
 #### How to use:
 
 
-#### Without position tracking
+#### Basic usage
 This will just return the lowest edits found (below `k`) for each query. 
 
 
@@ -39,7 +39,7 @@ use mini_myers::backend::{U32, U64};
 // that is 8 queries in parallel (8*32)
 let mut searcher = Searcher::<U32, Scan>::new();
 let queries = vec![b"ATG".to_vec(), b"TTG".to_vec()];
-let encoded = searcher.encode(&queries);
+let encoded = searcher.encode(&queries, false); //true = also search rc
 let target = b"CCCTCGCCCCCCATGCCCCC";
 
 // Scan mode: get minimum cost per query
@@ -48,14 +48,14 @@ assert_eq!(results, vec![0.0, 1.0]);
 
 // Positions mode: get all match positions
 let mut pos_searcher = Searcher::<U32, Positions>::new();
-let encoded = pos_searcher.encode(&queries);
+let encoded = pos_searcher.encode(&queries, false);
 let results = pos_searcher.search(&encoded, target, 4, None);
 println!("Found {} matches", results.len());
 
 // Use U64 backend for longer queries (up to 64 nucleotides)
 // that is 4 queries in parlalel (4*64)
 let mut searcher64 = Searcher::<U64, Scan>::new();
-let encoded = searcher64.encode(&queries);
+let encoded = searcher64.encode(&queries, false);
 let results = searcher64.search(&encoded, target, 4, None);
 ```
 
