@@ -1,4 +1,4 @@
-use mini_myers::{Positions, Scan, Searcher as mini_searcher, TQueries, U32, U64};
+use mini_myers::{Positions, Scan, Searcher as mini_searcher, U32};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use sassy::profiles::Iupac;
@@ -41,17 +41,18 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut rng = StdRng::seed_from_u64(42);
     let mut results = Vec::new();
 
-    let target_lens = vec![1_000, 10_000, 50_000, 100_000, 1_000_000];
+    let target_lens = vec![1_000, 10_000, 50_000];
     let query_lens = vec![32];
     let ks = vec![6];
     let iterations = 100;
     let n_queries = 200;
 
-    for target_len in target_lens {
+    // Regular search benchmarks
+    for target_len in &target_lens {
         for query_len in &query_lens {
             for k in &ks {
                 let (mini_search_result, mini_pos_result, sassy_result) =
-                    run_bench_round(&mut rng, target_len, *query_len, iterations, *k, n_queries);
+                    run_bench_round(&mut rng, *target_len, *query_len, iterations, *k, n_queries);
 
                 println!(
                     "target={:<7} query={:<2} k={} | mini_search: {:>8.4} ms/batch ({:>8.4} µs/query), mini_search_with_positions: {:>8.4} ms/batch ({:>8.4} µs/query), sassy: {:>8.4} ms/batch ({:>8.4} µs/query)",
@@ -77,7 +78,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     fs::create_dir_all(output_dir)?;
     let output_path = output_dir.join("sassy_vs_mini.csv");
     write_results(&results, &output_path)?;
-    println!("Saved to {}", output_path.display());
+    println!("\nSaved to {}", output_path.display());
 
     Ok(())
 }
@@ -158,6 +159,68 @@ fn run_bench_round(
     };
 
     (mini_search_result, mini_pos_result, sassy_result)
+}
+
+fn generate_target_with_matches(
+    rng: &mut StdRng,
+    target_len: usize,
+    query: &[u8],
+    n_matches: usize,
+    k: u8,
+) -> Vec<u8> {
+    let mut target = generate_random_dna(rng, target_len);
+
+    // Ensure we have enough space to insert matches
+    let min_spacing = query.len() + (k as usize) * 2;
+    let max_insert_pos = target_len.saturating_sub(query.len());
+
+    if max_insert_pos < n_matches * min_spacing {
+        // If target is too small, just return random DNA
+        return target;
+    }
+
+    // Insert matches at random positions, ensuring they don't overlap
+    let mut inserted_positions = Vec::new();
+    for _ in 0..n_matches {
+        let mut attempts = 0;
+        let pos = loop {
+            let candidate_pos = rng.gen_range(0..=max_insert_pos);
+            // Check if this position is far enough from other insertions
+            if inserted_positions
+                .iter()
+                .all(|&p: &usize| candidate_pos.abs_diff(p) >= min_spacing)
+            {
+                break candidate_pos;
+            }
+            attempts += 1;
+            if attempts > 100 {
+                // Give up if we can't find a good position, use a random one
+                break rng.gen_range(0..=max_insert_pos);
+            }
+        };
+
+        // Insert the query (possibly with some edits to match k)
+        for (i, &base) in query.iter().enumerate() {
+            if pos + i < target.len() {
+                // With probability based on k, introduce a mismatch
+                let should_mismatch = rng.gen_bool((k as f64) / (query.len() as f64));
+                if should_mismatch && k > 0 {
+                    // Insert a different base
+                    let bases = [b'A', b'T', b'G', b'C'];
+                    let mut new_base = bases[rng.gen_range(0..bases.len())];
+                    while new_base == base {
+                        new_base = bases[rng.gen_range(0..bases.len())];
+                    }
+                    target[pos + i] = new_base;
+                } else {
+                    target[pos + i] = base;
+                }
+            }
+        }
+        inserted_positions.push(pos);
+    }
+
+    target
 }
 
 fn generate_random_dna(rng: &mut StdRng, len: usize) -> Vec<u8> {

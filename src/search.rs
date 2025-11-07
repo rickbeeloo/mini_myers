@@ -184,12 +184,35 @@ impl<B: SimdBackend> ResultCollector<B> for ScanCollector<B> {
 
 struct PositionsCollector<B: SimdBackend> {
     results: Vec<MatchInfo>,
+    states: Vec<QueryState>,
     _phantom: PhantomData<B>,
 }
 
+#[derive(Clone, Default)]
+struct QueryState {
+    prev_cost: Option<f32>,
+    candidate: Option<MatchInfo>,
+    last_pos: Option<i32>,
+}
+
+impl QueryState {
+    #[inline(always)]
+    fn reset(&mut self) {
+        self.prev_cost = None;
+        self.candidate = None;
+        self.last_pos = None;
+    }
+}
+
 impl<B: SimdBackend> ResultCollector<B> for PositionsCollector<B> {
-    fn init(&mut self, _nq: usize, _m: usize, _initial_adjusted: i64) {
+    fn init(&mut self, nq: usize, _m: usize, _initial_adjusted: i64) {
         self.results.clear();
+        if self.states.len() < nq {
+            self.states.resize_with(nq, QueryState::default);
+        }
+        for state in self.states.iter_mut().take(nq) {
+            state.reset();
+        }
     }
 
     #[inline(always)]
@@ -223,11 +246,14 @@ impl<B: SimdBackend> ResultCollector<B> for PositionsCollector<B> {
 
             for (i, &score_scaled) in adjusted_slice[..(end - base)].iter().enumerate() {
                 if B::scalar_to_i64(score_scaled) <= k_scaled_i64 {
-                    self.results.push(MatchInfo {
-                        query_idx: base + i,
-                        cost: B::scalar_to_f32(score_scaled) * inv_scale,
+                    let query_idx = base + i;
+                    let cost = B::scalar_to_f32(score_scaled) * inv_scale;
+                    let match_info = MatchInfo {
+                        query_idx,
+                        cost,
                         pos,
-                    });
+                    };
+                    self.handle_match(match_info);
                 }
             }
         }
@@ -236,11 +262,71 @@ impl<B: SimdBackend> ResultCollector<B> for PositionsCollector<B> {
     #[inline(always)]
     fn update_best(&mut self, _adjusted: B::Simd, _block_idx: usize) {}
 
-    fn finalize(&mut self, _nq: usize, _k_scaled_vec: B::Simd, _inv_scale: f32) -> Self::Output {
+    fn finalize(&mut self, nq: usize, _k_scaled_vec: B::Simd, _inv_scale: f32) -> Self::Output {
+        for state in self.states.iter_mut().take(nq) {
+            if let Some(candidate) = state.candidate.take() {
+                self.results.push(candidate);
+            }
+            state.reset();
+        }
+
         std::mem::take(&mut self.results)
     }
 
     type Output = Vec<MatchInfo>;
+}
+
+impl<B: SimdBackend> PositionsCollector<B> {
+    #[inline(always)]
+    fn handle_match(&mut self, match_info: MatchInfo) {
+        const EPS: f32 = 1e-6;
+        let query_idx = match_info.query_idx;
+        if query_idx >= self.states.len() {
+            return;
+        }
+
+        // Quite a bit of code, simplify? to only keep local minima
+        // to make searching with sassy easier later
+        let state = &mut self.states[query_idx];
+
+        if let Some(prev_pos) = state.last_pos {
+            if match_info.pos > prev_pos + 1 {
+                if let Some(candidate) = state.candidate.take() {
+                    self.results.push(candidate);
+                }
+                state.prev_cost = None;
+            }
+        }
+
+        if let Some(prev) = state.prev_cost {
+            if match_info.cost + EPS < prev {
+                state.candidate = Some(match_info);
+            } else if (match_info.cost - prev).abs() <= EPS {
+                match &state.candidate {
+                    Some(current) => {
+                        if (match_info.cost - current.cost).abs() <= EPS
+                            || match_info.cost + EPS < current.cost
+                        {
+                            state.candidate = Some(match_info);
+                        }
+                    }
+                    None => {
+                        state.candidate = Some(match_info);
+                    }
+                }
+            } else if match_info.cost > prev + EPS {
+                if let Some(candidate) = state.candidate.take() {
+                    self.results.push(candidate);
+                }
+                state.candidate = None;
+            }
+        } else {
+            state.candidate = Some(match_info);
+        }
+
+        state.prev_cost = Some(match_info.cost);
+        state.last_pos = Some(match_info.pos);
+    }
 }
 
 /// Trait for executing searches (internal).
@@ -279,6 +365,7 @@ impl<B: SimdBackend> SearchExecutor<B> for Vec<MatchInfo> {
     ) -> Self {
         let mut collector = PositionsCollector {
             results: Vec::new(),
+            states: Vec::new(),
             _phantom: PhantomData,
         };
         search(state, &mut collector, encoded, target, k, alpha)
@@ -678,6 +765,86 @@ mod tests {
         assert_eq!(exact_matches[0].pos, 2);
         assert_eq!(exact_matches[1].pos, 8);
         assert_eq!(exact_matches[2].pos, 14);
+    }
+
+    #[test]
+    fn test_positions_local_minima_only() {
+        let mut searcher = Searcher::<U32, Positions>::new();
+        let queries = vec![vec![b'A'; 6]];
+        let encoded = searcher.encode(&queries);
+
+        let mut target = Vec::new();
+        target.extend_from_slice(b"TTT");
+        for _ in 0..6 {
+            target.push(b'A');
+        }
+        target.extend_from_slice(b"TTT");
+
+        let results = searcher.search(&encoded, &target, 3, None);
+        assert_eq!(results.len(), 1);
+        assert!((results[0].cost - 0.0).abs() < 1e-6);
+        assert_eq!(results[0].pos, 8);
+    }
+
+    #[test]
+    fn test_positions_plateau_keeps_rightmost() {
+        let mut searcher = Searcher::<U32, Positions>::new();
+        let queries = vec![vec![b'A'; 6]];
+        let encoded = searcher.encode(&queries);
+
+        let mut target = Vec::new();
+        target.extend_from_slice(b"TTT");
+        for _ in 0..7 {
+            target.push(b'A');
+        }
+        target.extend_from_slice(b"TTT");
+
+        println!("queries: {:?}", String::from_utf8_lossy(&queries[0]));
+        println!("target: {:?}", String::from_utf8_lossy(&target));
+
+        let results = searcher.search(&encoded, &target, 3, None);
+        assert_eq!(results.len(), 1);
+        assert!((results[0].cost - 0.0).abs() < 1e-6);
+        assert_eq!(results[0].pos, 9);
+    }
+
+    #[test]
+    fn test_positions_plateau_at_end_flushes() {
+        let mut searcher = Searcher::<U32, Positions>::new();
+        let queries = vec![vec![b'A'; 6]];
+        let encoded = searcher.encode(&queries);
+
+        let mut target = Vec::new();
+        target.extend_from_slice(b"TTT");
+        for _ in 0..7 {
+            target.push(b'A');
+        }
+
+        println!("queries: {:?}", String::from_utf8_lossy(&queries[0]));
+        println!("target: {:?}", String::from_utf8_lossy(&target));
+
+        let results = searcher.search(&encoded, &target, 3, None);
+        assert_eq!(results.len(), 1);
+        assert!((results[0].cost - 0.0).abs() < 1e-6);
+        assert_eq!(results[0].pos, 9);
+    }
+
+    #[test]
+    fn test_local_min_double_match() {
+        let mut searcher = Searcher::<U32, Positions>::new();
+        let queries = vec![vec![b'A'; 6]];
+        let encoded = searcher.encode(&queries);
+
+        let mut target = std::iter::repeat_n(b'T', 100).collect::<Vec<_>>();
+        // Insert query at position 10 and 50
+        let query = queries[0].clone();
+        target[10..10 + query.len()].copy_from_slice(&query);
+        target[50..50 + query.len()].copy_from_slice(&query);
+
+        let results = searcher.search(&encoded, &target, 3, None);
+        assert_eq!(results[0].pos, 15);
+        assert_eq!(results[1].pos, 55);
+        assert_eq!(results.len(), 2);
     }
 
     #[test]
