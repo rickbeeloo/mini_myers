@@ -1300,4 +1300,142 @@ mod tests {
         assert_eq!(results.len(), 1);
         assert_eq!(results[0], -1.0); // No match found
     }
+
+    // Like in sassy to make sure it finds the correct end idx:
+    // https://github.com/RagnarGrootKoerkamp/sassy/blob/0772487a8f08c37f5742aa6217f4744312b38a8e/src/search.rs#L1192
+    #[test]
+    fn search_fuzz() {
+        use crate::backend::U32;
+
+        // Helper: wrap a local thread_rng instead of repeated mutable borrows
+        fn random_range<R: rand::Rng + ?Sized>(r: std::ops::Range<usize>, rng: &mut R) -> usize {
+            rng.gen_range(r)
+        }
+
+        // Use closures to ensure rng is only borrowed mutably in one call-chain at a time
+        let mut pattern_lens = {
+            let mut rng = rand::thread_rng();
+            (10..=32)
+                .chain((0..20).map(|_| random_range(10..32, &mut rng)))
+                .collect::<Vec<_>>()
+        };
+
+        let mut text_lens = {
+            let mut rng = rand::thread_rng();
+            // Avoid multiple mutable borrows of rng by collecting each Vec separately, then joining them.
+            let mut out = (10..20).collect::<Vec<_>>();
+            out.extend((0..10).map(|_| random_range(10..100, &mut rng)));
+            out.extend((0..10).map(|_| random_range(100..1000, &mut rng)));
+            out.extend((0..10).map(|_| random_range(1000..10000, &mut rng)));
+            out
+        };
+
+        pattern_lens.sort();
+        text_lens.sort();
+
+        let mut searcher = Searcher::<U32, Positions>::new();
+
+        // Use a single mutable rng inside the outermost loop to avoid double mut borrow
+        for pattern_len in pattern_lens {
+            let mut rng = rand::thread_rng();
+
+            for t in text_lens.clone() {
+                println!("q {pattern_len} t {t}");
+                let pattern = (0..pattern_len)
+                    .map(|_| b"ACGT"[random_range(0..4, &mut rng)])
+                    .collect::<Vec<_>>();
+                // only fwd encode patterns
+                let fwd_encoded = searcher.encode(&[pattern.clone()], false);
+                let rc_encoded = searcher.encode(&[pattern.clone()], true);
+
+                let mut text = (0..t)
+                    .map(|_| b"ACGT"[random_range(0..4, &mut rng)])
+                    .collect::<Vec<_>>();
+
+                let edits = if pattern_len / 3 > 0 {
+                    random_range(0..pattern_len / 3, &mut rng)
+                } else {
+                    0
+                };
+                let mut p_mutated = pattern.clone();
+                for _ in 0..edits {
+                    // Prevent sampling an empty range, use inclusive 0..=2 (which always includes 0, 1, 2)
+                    let tp = random_range(0..3, &mut rng);
+                    match tp {
+                        0 => {
+                            // insert
+                            if p_mutated.is_empty() {
+                                continue;
+                            }
+                            let idx = random_range(0..p_mutated.len(), &mut rng);
+                            p_mutated.insert(idx, b"ACGT"[random_range(0..4, &mut rng)]);
+                        }
+                        1 => {
+                            // del
+                            if p_mutated.is_empty() {
+                                continue;
+                            }
+                            let idx = random_range(0..p_mutated.len(), &mut rng);
+                            p_mutated.remove(idx);
+                        }
+                        2 => {
+                            // replace
+                            if p_mutated.is_empty() {
+                                continue;
+                            }
+                            let idx = random_range(0..p_mutated.len(), &mut rng);
+                            p_mutated[idx] = b"ACGT"[random_range(0..4, &mut rng)];
+                        }
+                        _ => panic!(),
+                    }
+                }
+
+                fn show(x: &[u8]) -> &str {
+                    str::from_utf8(x).unwrap()
+                }
+                eprintln!("\n");
+                eprintln!("edits {edits}");
+                eprintln!("Search pattern p={pattern_len} {}", show(&pattern));
+                eprintln!("Inserted pattern {}", show(&p_mutated));
+
+                if p_mutated.is_empty() || p_mutated.len() > text.len() {
+                    continue;
+                }
+
+                let max_idx = text.len().saturating_sub(p_mutated.len());
+                if max_idx == 0 {
+                    continue;
+                }
+                let idx = random_range(0..max_idx, &mut rng);
+                eprintln!("text len {}", text.len());
+                eprintln!("planted idx {idx}");
+                let expected_end_idx = idx + p_mutated.len() - 1;
+                eprintln!("expected end idx {expected_end_idx}");
+
+                text.splice(idx..idx + p_mutated.len(), p_mutated);
+                eprintln!("text {}", show(&text));
+
+                // Just fwd
+                let matches = searcher.search(&fwd_encoded, &text, edits as u8, None);
+                eprintln!("matches {matches:?}");
+                let m = matches.iter().find(|m| {
+                    m.pos
+                        .abs_diff((expected_end_idx as u32).try_into().unwrap())
+                        <= edits as u32
+                });
+                assert!(m.is_some());
+
+                // Also rc search, should still find the same match
+                let matches = searcher.search(&rc_encoded, &text, edits as u8, None);
+
+                eprintln!("matches {matches:?}");
+                let m = matches.iter().find(|m| {
+                    m.pos
+                        .abs_diff((expected_end_idx as u32).try_into().unwrap())
+                        <= edits as u32
+                });
+                assert!(m.is_some());
+            }
+        }
+    }
 }
