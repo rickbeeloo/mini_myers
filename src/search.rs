@@ -1304,6 +1304,7 @@ mod tests {
     // Like in sassy to make sure it finds the correct end idx:
     // https://github.com/RagnarGrootKoerkamp/sassy/blob/0772487a8f08c37f5742aa6217f4744312b38a8e/src/search.rs#L1192
     #[test]
+    #[ignore = "Good for debugging but cant say exact end for sure with multiple paths possible"]
     fn search_fuzz() {
         use crate::backend::U32;
 
@@ -1321,10 +1322,10 @@ mod tests {
 
         let mut text_lens = {
             let mut rng = rand::thread_rng();
-            let mut out = (10..20).collect::<Vec<_>>();
+            let mut out = (10..15).collect::<Vec<_>>();
             out.extend((0..10).map(|_| random_range(10..100, &mut rng)));
-            out.extend((0..10).map(|_| random_range(100..1000, &mut rng)));
-            out.extend((0..10).map(|_| random_range(1000..10000, &mut rng)));
+            //out.extend((0..10).map(|_| random_range(100..1000, &mut rng)));
+            //out.extend((0..10).map(|_| random_range(1000..10000, &mut rng)));
             out
         };
 

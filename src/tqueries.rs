@@ -10,7 +10,7 @@
 /// use mini_myers::TQueries;
 ///
 /// let queries = vec![b"ATG".to_vec(), b"TTG".to_vec()];
-/// let transposed = TQueries::<U32>::new(&queries);
+/// let transposed = TQueries::<U32>::new(&queries, false);
 /// assert_eq!(transposed.n_queries, 2);
 /// assert_eq!(transposed.query_length, 3);
 /// ```
