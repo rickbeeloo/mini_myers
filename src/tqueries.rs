@@ -19,7 +19,7 @@ use crate::constant::{INVALID_IUPAC, IUPAC_MASKS};
 use std::marker::PhantomData;
 use wide::u8x32;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct TQueries<B: SimdBackend> {
     /// SIMD vectors representing transposed queries, one vector per position per block
     /// Layout: vectors[position][block_idx] where each block contains up to 32 queries
