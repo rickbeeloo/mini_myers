@@ -7,6 +7,8 @@ perm:
 asm:
     cargo rustc --release --bin mini_myers -- --emit=asm && find target/release/deps -name "mini_myers*.s"
 
+search_asm:
+    cargo asm --bin mini_myers "mini_myers::search::search" --rust > search_asm.s
 
 
 
