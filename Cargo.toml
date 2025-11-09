@@ -22,10 +22,10 @@ path = "src/main.rs"
 [dependencies]
 rand = "0.8.5"
 wide = "0.8.1"
-sassy = {path= "/home/solprof/PhD/sass_mini_myers_clone/sassy"}
+sassy = {git= "https://github.com/RagnarGrootKoerkamp/sassy/"}
 
 [dev-dependencies]
-sassy = {path= "/home/solprof/PhD/sass_mini_myers_clone/sassy", features = ["expose_trace_code"]}
+sassy = {git = "https://github.com/RagnarGrootKoerkamp/sassy/", features = ["expose_trace_code"]}
 rand = "0.8.5"
 
 [[bench]]
