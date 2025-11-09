@@ -592,8 +592,6 @@ dependencies = [
 [[package]]
 name = "sassy"
 version = "0.1.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8da80c2d4b282a5aae8ff3bc1b45bc2b17453af9fcf7eb02d902ddc739b50f8d"
 dependencies = [
  "clap",
  "colored",

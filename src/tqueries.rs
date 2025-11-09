@@ -38,6 +38,8 @@ pub struct TQueries<B: SimdBackend> {
     /// Precomputed peq bitvectors for each IUPAC mask
     /// Layout: peqs[iupac_mask][simd_vector_idx] where each SIMD vector contains `B::LANES` lanes
     pub peqs: [Vec<B::Simd>; IUPAC_MASKS],
+    /// Stored query sequences (including reverse complements if used)
+    pub queries: Vec<Vec<u8>>,
     _marker: PhantomData<B>,
 }
 
@@ -170,7 +172,19 @@ impl<B: SimdBackend> TQueries<B> {
             n_blocks,
             peq_masks,
             peqs,
+            queries: all_queries,
             _marker: PhantomData,
         }
+    }
+
+    pub fn get_query_seq(&self, query_idx: usize) -> &[u8] {
+        assert!(
+            query_idx < self.n_queries,
+            "Query index {} out of bounds (n_queries = {})",
+            query_idx,
+            self.n_queries
+        );
+
+        &self.queries[query_idx]
     }
 }

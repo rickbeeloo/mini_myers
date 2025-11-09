@@ -84,15 +84,14 @@ Note that `mini_myers` and `sassy` are not directly comparable.
 to `sassy` *but* without traceback and local minima scan. Here we search for 192 sequences, 
 a multiple of 8, which is ideal for `mini_myers` as well.
 
-| Query length | Target length | Sassy (µs/query) | Mini search (µs/query) | Mini search (pos) (µs/query) | Speedup (Pos × Sassy)[^1] |
-|--------------|--------------|------------------|------------------------|------------------------------|-------------------------------|
-| 32           | 50           |   0.9763         |   0.0312               |   0.0359                     | 27.2×                         |
-| 32           | 100          |   1.1464         |   0.0506               |   0.1240                     | 9.2×                          |
-| 32           | 1_000         |   2.2656         |   0.5051               |   0.6086                     | 3.7×                          |
-| 32           | 10_000        |  14.5188         |   4.8694               |   5.9998                     | 2.4×                          |
-| 32           | 50_000        |  67.0511         |  23.8459               |  30.3187                     | 2.2×                          |
-
-[^1]: Sassy also does traceback which costs time
+| Query length | Target length | Sassy (µs/query) | Mini search (µs/query) | Mini search (pos) (µs/query) | Speedup (Pos × Sassy) |
+|--------------|--------------|------------------|------------------------|------------------------------|---------------------------|
+| 32           | 32           |   0.9510         |   0.0234               |   0.0315                     | 30.2×                     |
+| 32           | 64           |   1.0031         |   0.0342               |   0.0495                     | 20.3×                     |
+| 32           | 100          |   1.1387         |   0.0504               |   0.0714                     | 16.0×                     |
+| 32           | 1,000        |   2.2480         |   0.5341               |   0.6269                     | 3.6×                      |
+| 32           | 10,000       |  14.4518         |   4.4380               |   6.2193                     | 2.3×                      |
+| 32           | 100,000      | 128.0516         |  44.2686               |  68.7540                     | 1.9×                      |
 
 Run the bench using `cargo bench --bench sassy`, now has `mini_search_with_positions` but you can replace 
 the call with `mini_search` to bench without positions. 
