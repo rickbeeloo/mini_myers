@@ -63,7 +63,6 @@ mod iupac;
 pub mod search;
 pub mod search_old;
 pub mod tqueries;
-pub mod trace;
 
 // Re-export commonly used items at the crate root
 pub use backend::{I32x8Backend, I64x4Backend, SimdBackend, U32, U64};
