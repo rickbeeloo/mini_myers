@@ -334,6 +334,10 @@ fn search_impl_scan<B: SimdBackend>(
     let ctx = create_context::<B>(m);
     let k_scaled_vec = B::splat_from_i64(params.k_scaled as i64);
 
+    if params.alpha_scaled < (1 << 8) {
+        process_prefix_overhang::<B>(state, m, &params, &ctx, vectors_in_block);
+    }
+
     // Main loop over target
     process_target_scan::<B>(state, encoded, target, &ctx, vectors_in_block);
 
@@ -352,7 +356,6 @@ fn search_impl_scan<B: SimdBackend>(
     )
 }
 
-/// Positions mode implementation - returns match positions
 #[inline(always)]
 fn search_impl_positions<B: SimdBackend>(
     state: &mut MyersSearchState<B>,
@@ -393,6 +396,10 @@ fn search_impl_positions<B: SimdBackend>(
     let ctx = create_context::<B>(m);
     let k_scaled_vec = B::splat_from_i64(params.k_scaled as i64);
 
+    if params.alpha_scaled < (1 << 8) {
+        process_prefix_overhang::<B>(state, m, &params, &ctx, vectors_in_block);
+    }
+
     // Main loop over target
     process_target_positions::<B>(
         state,
@@ -404,6 +411,7 @@ fn search_impl_positions<B: SimdBackend>(
         nq,
         n_original_queries,
         params.inv_scale,
+        None,
     );
 
     // Overhang trailing positions
@@ -421,7 +429,6 @@ fn search_impl_positions<B: SimdBackend>(
         );
     }
 
-    // Finalize and perform traceback
     finalize_and_traceback::<B>(state, encoded, target, params.alpha, nq, n_original_queries)
 }
 
@@ -471,6 +478,17 @@ fn process_target_scan<B: SimdBackend>(
             }
         }
     }
+}
+
+#[inline(always)]
+fn process_prefix_overhang<B: SimdBackend>(
+    state: &mut MyersSearchState<B>,
+    m: usize,
+    params: &SearchParams,
+    ctx: &SearchContext<B>,
+    vectors_in_block: usize,
+) {
+    // not working yet
 }
 
 #[inline(always)]
@@ -551,6 +569,7 @@ fn process_target_positions<B: SimdBackend>(
     nq: usize,
     n_original_queries: usize,
     inv_scale: f32,
+    target_block_idx: Option<usize>, // used in tracing
 ) {
     let adjust_vec = B::splat_zero();
 
@@ -560,7 +579,8 @@ fn process_target_positions<B: SimdBackend>(
         let pos = idx as i32;
 
         unsafe {
-            for block_idx in 0..vectors_in_block {
+            // If we have a specific target block we have to trace it
+            if let Some(block_idx) = target_block_idx {
                 let eq = *peq_slice.get_unchecked(block_idx);
                 let adjusted = advance_column(
                     state.pv.get_unchecked_mut(block_idx),
@@ -581,9 +601,175 @@ fn process_target_positions<B: SimdBackend>(
                     n_original_queries,
                     inv_scale,
                 );
+            } else {
+                // In this case we are just aligning so to all blocks
+                for block_idx in 0..vectors_in_block {
+                    let eq = *peq_slice.get_unchecked(block_idx);
+                    let adjusted = advance_column(
+                        state.pv.get_unchecked_mut(block_idx),
+                        state.mv.get_unchecked_mut(block_idx),
+                        state.score.get_unchecked_mut(block_idx),
+                        eq,
+                        adjust_vec,
+                        *ctx,
+                    );
+
+                    collect_matches::<B>(
+                        state,
+                        adjusted,
+                        k_scaled_vec,
+                        block_idx,
+                        nq,
+                        pos,
+                        n_original_queries,
+                        inv_scale,
+                    );
+                }
             }
         }
     }
+}
+
+#[inline(always)]
+pub fn trace_idea_scalar<B: SimdBackend>(
+    state: &mut MyersSearchState<B>,
+    encoded: &TQueries<B>,
+    target: &[u8],
+    suffix_overhang: usize, // difference between entire target and returned position by search
+    k: u8,
+    alpha: Option<f32>,
+    target_query_idx: usize, // we only need to process the block for this query index, we still waste LANES -1 here!
+) -> Vec<WrappedSassyMatch> {
+    let nq = encoded.n_queries;
+    let n_original_queries = encoded.n_original_queries;
+    let m = encoded.query_length;
+    assert!(
+        m > 0 && m <= B::LIMB_BITS,
+        "query length must be 1..={}",
+        B::LIMB_BITS
+    );
+
+    let params = SearchParams::new(alpha, k);
+    let initial_adjusted = (m as i64) * (params.alpha_scaled as i64);
+    state.reset(nq, m, initial_adjusted);
+
+    state.traced_matches.clear();
+    state.results.clear();
+    if state.states.len() < nq {
+        state.states.resize_with(nq, QueryState::default);
+    }
+    for s in state.states.iter_mut().take(nq) {
+        s.reset();
+    }
+
+    let block_idx = target_query_idx.div_ceil(B::LANES);
+
+    let ctx = create_context::<B>(m);
+    let mut deltas: Vec<(B::Simd, B::Simd, B::Simd, B::Simd)> =
+        Vec::with_capacity(target.len() + suffix_overhang);
+    let zero_eq_vec = B::splat_zero();
+    let mut adjust_vec = B::splat_zero();
+    let k_scaled_vec = B::splat_from_i64(params.k_scaled as i64);
+
+    for (idx, &tb) in target.iter().enumerate() {
+        let encoded_char = crate::iupac::get_encoded(tb);
+        let peq_slice = unsafe { encoded.peqs.get_unchecked(encoded_char as usize) };
+        let pos = idx as i32;
+
+        unsafe {
+            let eq = *peq_slice.get_unchecked(block_idx);
+            let adjusted = advance_column(
+                state.pv.get_unchecked_mut(block_idx),
+                state.mv.get_unchecked_mut(block_idx),
+                state.score.get_unchecked_mut(block_idx),
+                eq,
+                adjust_vec,
+                ctx,
+            );
+            deltas.push((
+                *state.pv.get_unchecked(block_idx),
+                *state.mv.get_unchecked(block_idx),
+                *state.score.get_unchecked(block_idx),
+                adjusted,
+            ));
+
+            collect_matches::<B>(
+                state,
+                adjusted,
+                k_scaled_vec,
+                block_idx,
+                nq,
+                pos,
+                n_original_queries,
+                params.inv_scale,
+            );
+        }
+    }
+
+    if params.alpha_scaled < (1 << 8) {
+        for trailing in 1..=suffix_overhang {
+            adjust_vec =
+                B::splat_from_i64((trailing as i64) * (params.extra_penalty_scaled as i64));
+            let pos: i32 = (target.len() + trailing - 1) as i32;
+
+            unsafe {
+                let adjusted = advance_column(
+                    state.pv.get_unchecked_mut(block_idx),
+                    state.mv.get_unchecked_mut(block_idx),
+                    state.score.get_unchecked_mut(block_idx),
+                    zero_eq_vec,
+                    adjust_vec,
+                    ctx,
+                );
+
+                deltas.push((
+                    *state.pv.get_unchecked(block_idx),
+                    *state.mv.get_unchecked(block_idx),
+                    *state.score.get_unchecked(block_idx),
+                    adjusted,
+                ));
+
+                collect_matches::<B>(
+                    state,
+                    adjusted,
+                    k_scaled_vec,
+                    block_idx,
+                    nq,
+                    pos,
+                    n_original_queries,
+                    params.inv_scale,
+                );
+            }
+        }
+    }
+
+    {
+        let target_lane = target_query_idx % B::LANES;
+        for (step_idx, (pv, mv, score, adjusted)) in deltas.iter().enumerate() {
+            let pv_arr = B::to_array(*pv);
+            let mv_arr = B::to_array(*mv);
+            let score_arr = B::to_array(*score);
+            let adj_arr = B::to_array(*adjusted);
+
+            let pv_lane = pv_arr.as_ref()[target_lane];
+            let mv_lane = mv_arr.as_ref()[target_lane];
+            let score_lane = score_arr.as_ref()[target_lane];
+            let adj_lane = adj_arr.as_ref()[target_lane];
+
+            let pv_lane_i64 = B::scalar_to_i64(pv_lane);
+            let mv_lane_i64 = B::scalar_to_i64(mv_lane);
+            let score_lane_i64 = B::scalar_to_i64(score_lane);
+            let adj_lane_i64 = B::scalar_to_i64(adj_lane);
+            let cost_f32 = (adj_lane_i64 as f32) * params.inv_scale;
+
+            println!(
+                "step {:3}: pv_lane={} mv_lane={} raw_score={} adjusted_scaled={} cost={}",
+                step_idx, pv_lane_i64, mv_lane_i64, score_lane_i64, adj_lane_i64, cost_f32
+            );
+        }
+    }
+
+    vec![]
 }
 
 #[inline(always)]
@@ -642,21 +828,6 @@ fn collect_matches<B: SimdBackend>(
     n_original_queries: usize,
     inv_scale: f32,
 ) {
-    let all_ones = B::splat_all_ones();
-    let match_mask = all_ones ^ B::simd_gt(adjusted, k_scaled_vec);
-    let match_bits_arr = B::to_array(match_mask);
-    let match_bits = match_bits_arr.as_ref();
-    let zero_scalar = B::scalar_from_i64(0);
-    let zero_scalar_i64 = B::scalar_to_i64(zero_scalar);
-
-    // Early exit if no matches
-    if !match_bits
-        .iter()
-        .any(|&b| B::scalar_to_i64(b) != zero_scalar_i64)
-    {
-        return;
-    }
-
     let adjusted_arr = B::to_array(adjusted);
     let adjusted_slice = adjusted_arr.as_ref();
     let k_scaled_arr = B::to_array(k_scaled_vec);
@@ -665,9 +836,11 @@ fn collect_matches<B: SimdBackend>(
     let end = (base + B::LANES).min(nq);
 
     for (i, &score_scaled) in adjusted_slice[..(end - base)].iter().enumerate() {
-        if B::scalar_to_i64(score_scaled) <= k_scaled_i64 {
+        let score_scaled_i64 = B::scalar_to_i64(score_scaled);
+
+        if score_scaled_i64 <= k_scaled_i64 {
             let query_idx = base + i;
-            let cost = B::scalar_to_f32(score_scaled) * inv_scale;
+            let cost = (score_scaled_i64 as f32) * inv_scale;
             let strand = if query_idx >= n_original_queries {
                 Strand::Rc
             } else {
@@ -1052,6 +1225,17 @@ mod tests {
     }
 
     #[test]
+    fn test_overhang_left() {
+        let q = b"CCGGGG";
+        let t = b"GGGGAAAAAAAAAAAAAAA";
+        let mut searcher = Searcher::<U32>::new();
+        let encoded = searcher.encode(&vec![q.to_vec()], false);
+        let results = searcher.search(&encoded, t, 2, Some(0.5));
+        println!("results: {:?}", results);
+        assert_ne!(results.len(), 0);
+    }
+
+    #[test]
     fn test_overhang_matches_standard_when_alpha_one() {
         let mut searcher = Searcher::<U32>::new();
         let queries = vec![b"ATG".to_vec()];
@@ -1342,5 +1526,40 @@ mod tests {
 
         assert_eq!(results.len(), 1);
         assert_eq!(results[0], -1.0); // No match found
+    }
+
+    #[test]
+    fn test_trace_idea_scalar() {
+        let mut searcher = Searcher::<U32>::new();
+        let queries = vec![b"CCGGG".to_vec()];
+        let target = b"GGGAAAA"; // Ends at match (we need that to trace)
+        let encoded = searcher.encode(&queries, false);
+
+        println!("\n=== Testing CCGGG vs GGGAAAA ===");
+        println!("Query: CCGGG (len=5)");
+        println!("Target: GGGAAAA (len=7)");
+        println!("Expected: CC overhang (2*0.5=1.0) + GGG exact match = 1.0 total");
+
+        // Test with k=1 (should fail)
+        let matches_k1 = searcher.scan(&encoded, target, 1, Some(0.5));
+        println!("k=1 result: {:?}", matches_k1);
+
+        // Test with k=2 (should succeed with cost 1.0)
+        let matches_k2 = searcher.scan(&encoded, target, 2, Some(0.5));
+        println!("k=2 result: {:?}", matches_k2);
+
+        // Also test positions mode to see what's happening
+        let pos_matches = searcher.search(&encoded, target, 1, Some(0.5));
+        for m in pos_matches.iter() {
+            println!(
+                "Position match: pos={}, cost={}",
+                m.sassy_match.text_end, m.sassy_match.cost
+            );
+        }
+
+        assert_eq!(
+            matches_k2[0], 1.0,
+            "Expected cost 1.0 (2 chars overhang at 0.5 each)"
+        );
     }
 }

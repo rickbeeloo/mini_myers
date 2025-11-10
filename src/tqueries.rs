@@ -223,3 +223,17 @@ impl<B: SimdBackend> TQueries<B> {
         result
     }
 }
+
+mod tests {
+    use super::*;
+    use crate::backend::U32;
+
+    #[test]
+    fn test_get_peq_masks_for_queries() {
+        let queries = vec![b"ATG".to_vec(), b"TTG".to_vec()];
+        let transposed = TQueries::<U32>::new(&queries, false);
+        let peq_masks = transposed.get_peq_masks_for_queries(&[0]);
+        println!("{:?}", peq_masks);
+        println!("{:?}", peq_masks[crate::iupac::get_encoded(b'T') as usize]);
+    }
+}
