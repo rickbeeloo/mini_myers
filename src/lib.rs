@@ -1,3 +1,4 @@
+#![feature(generic_const_exprs)]
 //! # mini_myers
 //!
 //! SIMD implementation of the Myers bitvector algorithm specifically to test
@@ -60,9 +61,11 @@ pub mod constant {
 pub mod backend;
 mod iupac;
 pub mod search;
+pub mod search_old;
 pub mod tqueries;
+pub mod trace;
 
 // Re-export commonly used items at the crate root
 pub use backend::{I32x8Backend, I64x4Backend, SimdBackend, U32, U64};
-pub use search::{MatchInfo, Positions, Scan, Searcher};
+pub use search::Searcher;
 pub use tqueries::TQueries;

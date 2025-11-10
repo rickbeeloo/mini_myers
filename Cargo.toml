@@ -22,10 +22,12 @@ path = "src/main.rs"
 [dependencies]
 rand = "0.8.5"
 wide = "0.8.1"
-sassy = {git= "https://github.com/RagnarGrootKoerkamp/sassy/"}
+sassy = { git = "https://github.com/RagnarGrootKoerkamp/sassy.git", features = ["expose_trace_code"] }
+pa-types = "1.2.0"
+
 
 [dev-dependencies]
-sassy = {git = "https://github.com/RagnarGrootKoerkamp/sassy/", features = ["expose_trace_code"]}
+sassy = { git = "https://github.com/RagnarGrootKoerkamp/sassy.git", features = ["expose_trace_code"] }
 rand = "0.8.5"
 
 [[bench]]

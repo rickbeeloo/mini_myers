@@ -187,4 +187,39 @@ impl<B: SimdBackend> TQueries<B> {
 
         &self.queries[query_idx]
     }
+
+    /// Get peq masks for a subset of query indices.
+    /// Returns a vector of peq masks, one per IUPAC mask, where each mask is a SIMD vector
+    /// with the peq bitvectors for the specified query indices in each lane.
+    /// If fewer than B::LANES query indices are provided, the remaining lanes are filled with zeros.
+    pub fn get_peq_masks_for_queries(&self, query_indices: &[usize]) -> Vec<B::Simd> {
+        assert!(
+            query_indices.len() <= B::LANES,
+            "Cannot handle more than {} queries at once",
+            B::LANES
+        );
+
+        let mut result = Vec::with_capacity(crate::constant::IUPAC_MASKS);
+
+        for mask_idx in 0..crate::constant::IUPAC_MASKS {
+            let mut lane = B::LaneArray::default();
+            let lane_slice = lane.as_mut();
+
+            for (lane_idx, &query_idx) in query_indices.iter().enumerate() {
+                if query_idx < self.n_queries {
+                    lane_slice[lane_idx] =
+                        B::mask_word_to_scalar(self.peq_masks[mask_idx][query_idx]);
+                } else {
+                    lane_slice[lane_idx] = B::scalar_from_i64(0);
+                }
+            }
+
+            // Fill remaining lanes with zeros
+            lane_slice[query_indices.len()..].fill(B::scalar_from_i64(0));
+
+            result.push(B::from_array(lane));
+        }
+
+        result
+    }
 }

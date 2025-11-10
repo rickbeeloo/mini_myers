@@ -1,5 +1,6 @@
-use mini_myers::{Positions, Scan, Searcher as mini_searcher, U32};
+use mini_myers::{Searcher as mini_searcher, U32};
 use rand::rngs::StdRng;
+use rand::seq::SliceRandom;
 use rand::{Rng, SeedableRng};
 use sassy::profiles::Iupac;
 use sassy::Searcher;
@@ -16,6 +17,7 @@ struct BenchResult {
     k: u8,
     iterations: usize,
     queries_per_iter: usize,
+    num_matches: usize,
     avg_batch_ns: f64,
     avg_per_query_ns: f64,
 }
@@ -43,7 +45,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     let target_lens = vec![32, 64, 100, 1000, 10_000, 100_000];
     let query_lens = vec![32];
-    let ks = vec![8];
+    let ks = vec![4];
     let iterations = 10;
     let n_queries = 96;
 
@@ -55,16 +57,19 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     run_bench_round(&mut rng, *target_len, *query_len, iterations, *k, n_queries);
 
                 println!(
-                    "target={:<7} query={:<2} k={} | mini_search: {:>8.4} ms/batch ({:>8.4} µs/query), mini_search_with_positions: {:>8.4} ms/batch ({:>8.4} µs/query), sassy: {:>8.4} ms/batch ({:>8.4} µs/query)",
+                    "target={:<7} query={:<2} k={} | mini_search: {:>8.4} ms/batch ({:>8.4} µs/query, {} matches), mini_search_with_positions: {:>8.4} ms/batch ({:>8.4} µs/query, {} matches), sassy: {:>8.4} ms/batch ({:>8.4} µs/query, {} matches)",
                     target_len,
                     query_len,
                     k,
                     mini_search_result.avg_batch_ms(),
                     mini_search_result.avg_per_query_us(),
+                    mini_search_result.num_matches,
                     mini_pos_result.avg_batch_ms(),
                     mini_pos_result.avg_per_query_us(),
+                    mini_pos_result.num_matches,
                     sassy_result.avg_batch_ms(),
-                    sassy_result.avg_per_query_us()
+                    sassy_result.avg_per_query_us(),
+                    sassy_result.num_matches
                 );
 
                 results.push(mini_search_result);
@@ -91,17 +96,37 @@ fn run_bench_round(
     k: u8,
     n_queries: usize,
 ) -> (BenchResult, BenchResult, BenchResult) {
-    let target = generate_random_dna(rng, target_len);
+    let mut target = generate_random_dna(rng, target_len);
     let mut queries = Vec::new();
     for _ in 0..n_queries {
         queries.push(generate_random_dna(rng, query_len));
     }
 
+    // Insert 1-4 matches of each query into the target
+    insert_query_matches(rng, &mut target, &queries, k);
+
     let mut searcher = Searcher::<Iupac>::new_rc();
 
-    let mut mini_scanner = mini_searcher::<U32, Scan>::new();
-    let mut mini_searcher = mini_searcher::<U32, Positions>::new();
+    // let mut mini_scanner = mini_searcher::<U32, Scan>::new();
+    // let mut mini_searcher = mini_searcher::<U32, Positions>::new();
+
+    let mut mini_searcher = mini_searcher::<U32>::new();
     let encoded = mini_searcher.encode(&queries, true);
+
+    // Count matches for sassy (run once before timing)
+    let mut sassy_match_count = 0;
+    for q in &queries {
+        let matches = searcher.search(q, &target, k as usize);
+        sassy_match_count += matches.len();
+    }
+
+    // Count matches for mini_search (run once before timing)
+    let mini_search_result_sample = mini_searcher.search(&encoded, &target, k, None);
+    let mini_search_match_count = mini_search_result_sample.len();
+
+    // Count matches for mini_search_with_positions (run once before timing)
+    let mini_pos_result_sample = mini_searcher.search(&encoded, &target, k, None);
+    let mini_pos_match_count = mini_pos_result_sample.len();
 
     // Benchmark sassy
     let sassy_total = time_iterations(iterations, || {
@@ -113,7 +138,7 @@ fn run_bench_round(
 
     // Benchmark mini_search (without positions)
     let mini_search_total = time_iterations(iterations, || {
-        let result = mini_scanner.search(&encoded, &target, k, None);
+        let result = mini_searcher.scan(&encoded, &target, k, None);
         black_box(result);
     });
 
@@ -132,6 +157,7 @@ fn run_bench_round(
         k,
         iterations,
         queries_per_iter,
+        num_matches: mini_search_match_count,
         avg_batch_ns: average_per_batch(mini_search_total, iterations),
         avg_per_query_ns: average_per_query(mini_search_total, iterations, queries_per_iter),
     };
@@ -143,6 +169,7 @@ fn run_bench_round(
         k,
         iterations,
         queries_per_iter,
+        num_matches: mini_pos_match_count,
         avg_batch_ns: average_per_batch(mini_pos_total, iterations),
         avg_per_query_ns: average_per_query(mini_pos_total, iterations, queries_per_iter),
     };
@@ -154,6 +181,7 @@ fn run_bench_round(
         k,
         iterations,
         queries_per_iter,
+        num_matches: sassy_match_count,
         avg_batch_ns: average_per_batch(sassy_total, iterations),
         avg_per_query_ns: average_per_query(sassy_total, iterations, queries_per_iter),
     };
@@ -169,6 +197,50 @@ fn generate_random_dna(rng: &mut StdRng, len: usize) -> Vec<u8> {
         dna.push(bases[idx]);
     }
     dna
+}
+
+fn insert_query_matches(rng: &mut StdRng, target: &mut Vec<u8>, queries: &[Vec<u8>], k: u8) {
+    let bases = [b'A', b'T', b'G', b'C'];
+
+    for query in queries {
+        // Randomly choose 1-4 matches to insert for this query
+        let num_matches = rng.gen_range(1..=4);
+
+        for _ in 0..num_matches {
+            // Randomly choose position in target to insert
+            let pos = rng.gen_range(0..=target.len());
+
+            // Decide whether to insert exact match or match with edits (up to k/2 edits)
+            let use_exact = rng.gen_bool(0.7); // 70% exact matches, 30% with edits
+
+            let mut match_seq = if use_exact {
+                query.clone()
+            } else {
+                // Create a variant with some edits (substitutions only, up to k/2)
+                let max_edits = (k / 2).max(1) as usize;
+                let num_edits = rng.gen_range(1..=max_edits.min(query.len()));
+                let mut variant = query.clone();
+
+                // Randomly select positions to mutate
+                let mut positions: Vec<usize> = (0..query.len()).collect();
+                positions.shuffle(rng);
+
+                for &pos_idx in positions.iter().take(num_edits) {
+                    // Change to a different base
+                    let current_base = variant[pos_idx];
+                    let mut new_base = bases[rng.gen_range(0..bases.len())];
+                    while new_base == current_base {
+                        new_base = bases[rng.gen_range(0..bases.len())];
+                    }
+                    variant[pos_idx] = new_base;
+                }
+                variant
+            };
+
+            // Insert the match sequence at the chosen position
+            target.splice(pos..pos, match_seq.iter().copied());
+        }
+    }
 }
 
 fn time_iterations<F>(iterations: usize, mut f: F) -> Duration
@@ -196,19 +268,20 @@ fn write_results(results: &[BenchResult], output_path: &Path) -> std::io::Result
     let mut file = File::create(output_path)?;
     writeln!(
         file,
-        "tool,target_len,query_len,k,iterations,queries_per_iter,avg_batch_ns,avg_batch_ms,avg_per_query_ns,avg_per_query_us"
+        "tool,target_len,query_len,k,iterations,queries_per_iter,num_matches,avg_batch_ns,avg_batch_ms,avg_per_query_ns,avg_per_query_us"
     )?;
 
     for result in results {
         writeln!(
             file,
-            "{},{},{},{},{},{},{:.6},{:.6},{:.6},{:.6}",
+            "{},{},{},{},{},{},{},{:.6},{:.6},{:.6},{:.6}",
             result.tool,
             result.target_len,
             result.query_len,
             result.k,
             result.iterations,
             result.queries_per_iter,
+            result.num_matches,
             result.avg_batch_ns,
             result.avg_batch_ms(),
             result.avg_per_query_ns,
