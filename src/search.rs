@@ -86,18 +86,19 @@ impl<B: SimdBackend> Searcher<B> {
         last_bit_mask: B::Simd,
     ) {
         let all_ones = B::splat_all_ones();
-        let xv = eq | *mv;
         let eq_and_pv = eq & *pv;
-        let sum = eq_and_pv + *pv;
-        let xh = (sum ^ *pv) | eq;
-        let ph = *mv | (all_ones ^ (xh | *pv));
+        let xh = ((eq_and_pv + *pv) ^ *pv) | eq;
         let mh = *pv & xh;
+        let ph = *mv | (all_ones ^ (xh | *pv));
+
         let ph_shifted = ph << 1;
         let mh_shifted = mh << 1;
+
+        let xv = eq | *mv;
         *pv = mh_shifted | (all_ones ^ (xv | ph_shifted));
         *mv = ph_shifted & xv;
 
-        // Score update
+        // Score update - keep separate
         let ph_bit = (ph & last_bit_mask) >> last_bit_shift;
         let mh_bit = (mh & last_bit_mask) >> last_bit_shift;
         *score = (*score + ph_bit) - mh_bit;
