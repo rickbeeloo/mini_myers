@@ -73,15 +73,16 @@ In the example above, this would give a cost of `3 * 0.5 = 1.5`
 #### Benchmark
 Note that `mini_myers` and `sassy` are not directly comparable. 
 The `mini_myers` "scan" mode just returns whether a match is present `<=k`, whereas sassy 
-finds the positions and preforms traceback (of course much more compute).
+finds the positions and performs traceback (of course much more compute).
 
 | Query length | Target length | Sassy (µs/query) | Mini scan (µs/query) | Speedup (Mini × Sassy) |
 |--------------|--------------|------------------|----------------------|------------------------|
-| 32           | 32           |   11.52          |   0.52               | 22.1×                  |
-| 32           | 64           |   10.84          |   0.50               | 21.7×                  |
-| 32           | 100          |   10.53          |   0.47               | 22.4×                  |
-| 32           | 1,000        |   12.20          |   0.57               | 21.4×                  |
-| 32           | 10,000       |   21.16          |   1.16               | 18.3×                  |
-| 32           | 100,000      |  113.74          |   6.61               | 17.2×                  |
+| 32           | 32           |   11.79          |   1.83               | 6.4×                   |
+| 32           | 64           |   11.22          |   1.74               | 6.4×                   |
+| 32           | 100          |   10.64          |   1.61               | 6.6×                   |
+| 32           | 1,000        |   12.58          |   2.00               | 6.3×                   |
+| 32           | 10,000       |   21.31          |   3.76               | 5.7×                   |
+| 32           | 100,000      |  114.81          |  23.22               | 4.9×                   |
+
 
 Run the bench using `cargo bench --bench sassy`. 

@@ -29,7 +29,7 @@ fn main() {
     }
     let mut searcher = Searcher::<U32>::new();
     let t_queries = TQueries::<U32>::new(&queries, false);
-    let mut target = generate_random_dna(10_000_000);
+    let mut target = generate_random_dna(100_000_000);
 
     // Randomly insert 10 query matches into the target
     let mut rng = StdRng::seed_from_u64(123); // Different seed for insertion positions
@@ -39,15 +39,14 @@ fn main() {
                                               //     let query_idx = rng.gen_range(0..n_queries);
                                               //     let query = &queries[query_idx];
 
-    //     // Randomly select a position where the query can fit
-    //     let max_pos = target.len() - query_len;
-    //     let insert_pos = rng.gen_range(0..=max_pos);
+    // Randomly select a position where the query can fit
+    let max_pos = target.len() - query_len;
+    let insert_pos = rng.gen_range(0..=max_pos);
 
-    //     // Insert the query at the selected position
-    //     target[insert_pos..insert_pos + query_len].copy_from_slice(query);
-    // }
+    // Insert the query at the selected position
+    target[insert_pos..insert_pos + query_len].copy_from_slice(&queries[0]);
 
-    let results = searcher.scan(&t_queries, &target, 1, None);
+    let results = searcher.scan(&t_queries, &target, 2, None);
     println!("number of matches: {}", results.len());
     black_box(&results);
 }

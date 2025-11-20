@@ -1,4 +1,3 @@
-#![feature(generic_const_exprs)]
 //! # mini_myers
 //!
 //! SIMD implementation of the Myers bitvector algorithm specifically to test
