@@ -128,7 +128,6 @@ impl<B: SimdBackend> Searcher<B> {
         let num_blocks = t_queries.peqs[0].len();
         let alpha_val = alpha.unwrap_or(1.0);
         let alpha_pattern = Self::generate_alpha_mask(alpha_val, t_queries.query_length);
-        let all_ones = B::splat_all_ones();
 
         self.ensure_capacity(num_blocks, t_queries.n_queries);
         self.reset_state(t_queries, alpha_pattern);
@@ -136,6 +135,7 @@ impl<B: SimdBackend> Searcher<B> {
         let k_simd = B::splat_from_usize(k as usize);
         let last_bit_shift = (t_queries.query_length - 1) as u32;
         let last_bit_mask = B::splat_one() << last_bit_shift;
+        let all_ones = B::splat_all_ones();
 
         let vp_ptr = self.vp.as_mut_ptr();
         let vn_ptr = self.vn.as_mut_ptr();
@@ -148,22 +148,16 @@ impl<B: SimdBackend> Searcher<B> {
 
             let peq_block_list = unsafe { t_queries.peqs.get_unchecked(encoded as usize) };
 
-            unsafe {
-                for block_i in 0..num_blocks {
-                    let eq = *peq_block_list.get_unchecked(block_i);
+            for block_i in 0..num_blocks {
+                let eq = peq_block_list[block_i];
+                let vp = &mut self.vp[block_i];
+                let vn = &mut self.vn[block_i];
+                let score = &mut self.score[block_i];
 
-                    let vp_ref = &mut *vp_ptr.add(block_i);
-                    let vn_ref = &mut *vn_ptr.add(block_i);
-                    let score_ref = &mut *score_ptr.add(block_i);
+                Self::myers_col(vp, vn, score, eq, last_bit_shift, last_bit_mask);
 
-                    Self::myers_col(vp_ref, vn_ref, score_ref, eq, last_bit_shift, last_bit_mask);
-
-                    // Update mask (read/write via pointers to bypass bounds checks)
-                    let score = *score_ref;
-                    let gt_mask = B::simd_gt(score, k_simd);
-                    let le_mask = gt_mask ^ all_ones;
-                    *masks_ptr.add(block_i) = *masks_ptr.add(block_i) | le_mask;
-                }
+                let gt_mask = B::simd_gt(*score, k_simd);
+                self.match_masks[block_i] |= gt_mask ^ all_ones;
             }
         }
 
