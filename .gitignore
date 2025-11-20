@@ -1,4 +1,5 @@
 /target
+/backup
 flamegraph.svg
 perf*
 *.asm

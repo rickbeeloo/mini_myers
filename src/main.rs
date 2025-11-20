@@ -1,5 +1,6 @@
 use mini_myers::backend::U32;
 use mini_myers::Searcher;
+use mini_myers::TQueries;
 
 #[allow(dead_code)]
 fn generate_random_dna(l: usize) -> Vec<u8> {
@@ -27,7 +28,7 @@ fn main() {
         queries.push(generate_random_dna(query_len));
     }
     let mut searcher = Searcher::<U32>::new();
-    let encoded = searcher.encode(&queries, false);
+    let t_queries = TQueries::<U32>::new(&queries, false);
     let mut target = generate_random_dna(10_000_000);
 
     // Randomly insert 10 query matches into the target
@@ -46,7 +47,7 @@ fn main() {
     //     target[insert_pos..insert_pos + query_len].copy_from_slice(query);
     // }
 
-    let results = searcher.search(&encoded, &target, 1, None);
+    let results = searcher.scan(&t_queries, &target, 1, None);
     println!("number of matches: {}", results.len());
     black_box(&results);
 }

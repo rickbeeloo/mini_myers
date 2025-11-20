@@ -79,22 +79,16 @@ In the example above, this would give a cost of `3 * 0.5 = 1.5`
 
 #### Benchmark
 Note that `mini_myers` and `sassy` are not directly comparable. 
-`mini_seaerch` just tells us if something is present below `k`, and
-`mini_search_with_positions` does return the match locations similar
-to `sassy` *but* without traceback and local minima scan. Here we search for 192 sequences, 
-a multiple of 8, which is ideal for `mini_myers` as well.
+The `mini_myers` "scan" mode just returns whether a match is present `<=k`, whereas sassy 
+finds the positions and preforms traceback (of course much more compute).
 
-| Query length | Target length | Sassy (µs/query) | Mini search (µs/query) | Mini search (pos) (µs/query) | Speedup (Pos × Sassy) |
-|--------------|--------------|------------------|------------------------|------------------------------|---------------------------|
-| 32           | 32           |   0.9510         |   0.0234               |   0.0315                     | 30.2×                     |
-| 32           | 64           |   1.0031         |   0.0342               |   0.0495                     | 20.3×                     |
-| 32           | 100          |   1.1387         |   0.0504               |   0.0714                     | 16.0×                     |
-| 32           | 1,000        |   2.2480         |   0.5341               |   0.6269                     | 3.6×                      |
-| 32           | 10,000       |  14.4518         |   4.4380               |   6.2193                     | 2.3×                      |
-| 32           | 100,000      | 128.0516         |  44.2686               |  68.7540                     | 1.9×                      |
+| Query length | Target length | Sassy (µs/query) | Mini scan (µs/query) | Speedup (Mini × Sassy) |
+|--------------|--------------|------------------|----------------------|------------------------|
+| 32           | 32           |   11.52          |   0.52               | 22.1×                  |
+| 32           | 64           |   10.84          |   0.50               | 21.7×                  |
+| 32           | 100          |   10.53          |   0.47               | 22.4×                  |
+| 32           | 1,000        |   12.20          |   0.57               | 21.4×                  |
+| 32           | 10,000       |   21.16          |   1.16               | 18.3×                  |
+| 32           | 100,000      |  113.74          |   6.61               | 17.2×                  |
 
-Run the bench using `cargo bench --bench sassy`, now has `mini_search_with_positions` but you can replace 
-the call with `mini_search` to bench without positions. 
-
-
-
+Run the bench using `cargo bench --bench sassy`. 

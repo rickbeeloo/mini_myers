@@ -1,4 +1,6 @@
-use mini_myers::{Searcher as mini_searcher, U32};
+use mini_myers::backend::U32;
+use mini_myers::search::Searcher as mini_searcher;
+use mini_myers::TQueries;
 use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
 use rand::{Rng, SeedableRng};
@@ -46,7 +48,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let target_lens = vec![32, 64, 100, 1000, 10_000, 100_000];
     let query_lens = vec![32];
     let ks = vec![4];
-    let iterations = 10;
+    let iterations = 100;
     let n_queries = 96;
 
     // Regular search benchmarks
@@ -107,11 +109,9 @@ fn run_bench_round(
 
     let mut searcher = Searcher::<Iupac>::new_rc();
 
-    // let mut mini_scanner = mini_searcher::<U32, Scan>::new();
-    // let mut mini_searcher = mini_searcher::<U32, Positions>::new();
-
+    // Create TQueries from the queries
+    let t_queries = TQueries::<U32>::new(&queries, false);
     let mut mini_searcher = mini_searcher::<U32>::new();
-    let encoded = mini_searcher.encode(&queries, true);
 
     // Count matches for sassy (run once before timing)
     let mut sassy_match_count = 0;
@@ -121,12 +121,12 @@ fn run_bench_round(
     }
 
     // Count matches for mini_search (run once before timing)
-    let mini_search_result_sample = mini_searcher.search(&encoded, &target, k, None);
-    let mini_search_match_count = mini_search_result_sample.len();
+    let mini_search_result_sample = mini_searcher.scan(&t_queries, &target, k as u32, None);
+    let mini_search_match_count = mini_search_result_sample.iter().filter(|&&x| x).count();
 
     // Count matches for mini_search_with_positions (run once before timing)
-    let mini_pos_result_sample = mini_searcher.search(&encoded, &target, k, None);
-    let mini_pos_match_count = mini_pos_result_sample.len();
+    let mini_pos_result_sample = mini_searcher.scan(&t_queries, &target, k as u32, None);
+    let mini_pos_match_count = mini_pos_result_sample.iter().filter(|&&x| x).count();
 
     // Benchmark sassy
     let sassy_total = time_iterations(iterations, || {
@@ -136,15 +136,15 @@ fn run_bench_round(
         }
     });
 
-    // Benchmark mini_search (without positions)
+    // Benchmark mini_search (same as with positions - new API only has search)
     let mini_search_total = time_iterations(iterations, || {
-        let result = mini_searcher.scan(&encoded, &target, k, None);
+        let result = mini_searcher.scan(&t_queries, &target, k as u32, None);
         black_box(result);
     });
 
-    // Benchmark mini_search_with_positions
+    // Benchmark mini_search_with_positions (same as above in new API)
     let mini_pos_total = time_iterations(iterations, || {
-        let result = mini_searcher.search(&encoded, &target, k, None);
+        let result = mini_searcher.scan(&t_queries, &target, k as u32, None);
         black_box(result);
     });
 
