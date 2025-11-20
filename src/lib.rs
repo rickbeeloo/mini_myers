@@ -22,22 +22,22 @@
 //! use mini_myers::{Searcher, TQueries};
 //! use mini_myers::backend::{U32, U64};
 //!
-//! // Create a searcher with U32 backend
-//! let mut searcher = Searcher::<U32>::new();
+//! // Create a searcher with U32 backend (alpha=None means alpha=1.0)
+//! let mut searcher = Searcher::<U32>::new(None);
 //! let queries = vec![b"ATG".to_vec(), b"TTG".to_vec()];
 //! let encoded = TQueries::<U32>::new(&queries, false);
 //! let target = b"CCCTCGCCCCCCATGCCCCC";
 //!
 //! // Scan mode: get boolean results indicating if each query matches (within k edits)
-//! let results = searcher.scan(&encoded, target, 0, None);
+//! let results = searcher.scan(&encoded, target, 0);
 //! assert!(results[0]); // "ATG" matches
 //! assert!(!results[1]); // "TTG" doesn't match
 //!
 //!
 //! // Use U64 backend for longer queries (up to 64 nucleotides)
-//! let mut searcher64 = Searcher::<U64>::new();
+//! let mut searcher64 = Searcher::<U64>::new(None);
 //! let encoded = TQueries::<U64>::new(&queries, false);
-//! let results = searcher64.scan(&encoded, target, 4, None);
+//! let results = searcher64.scan(&encoded, target, 4);
 //! ```
 //!
 //! ## Performance

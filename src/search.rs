@@ -8,6 +8,7 @@ pub struct Searcher<B: SimdBackend> {
 
     match_masks: Vec<B::Simd>,
     results: Vec<bool>,
+    alpha_pattern: u64,
 }
 
 impl<B: SimdBackend> Default for Searcher<B> {
@@ -18,13 +19,22 @@ impl<B: SimdBackend> Default for Searcher<B> {
             score: Vec::new(),
             match_masks: Vec::new(),
             results: Vec::new(),
+            alpha_pattern: Self::generate_alpha_mask(1.0, 64),
         }
     }
 }
 
 impl<B: SimdBackend> Searcher<B> {
-    pub fn new() -> Self {
-        Self::default()
+    pub fn new(alpha: Option<f32>) -> Self {
+        let alpha_val = alpha.unwrap_or(1.0);
+        Self {
+            vp: Vec::new(),
+            vn: Vec::new(),
+            score: Vec::new(),
+            match_masks: Vec::new(),
+            results: Vec::new(),
+            alpha_pattern: Self::generate_alpha_mask(alpha_val, 64),
+        }
     }
 
     #[inline(always)]
@@ -118,16 +128,15 @@ impl<B: SimdBackend> Searcher<B> {
     }
 
     #[inline(never)]
-    pub fn scan(
-        &mut self,
-        t_queries: &TQueries<B>,
-        text: &[u8],
-        k: u32,
-        alpha: Option<f32>,
-    ) -> &[bool] {
+    pub fn scan(&mut self, t_queries: &TQueries<B>, text: &[u8], k: u32) -> &[bool] {
         let num_blocks = t_queries.peqs[0].len();
-        let alpha_val = alpha.unwrap_or(1.0);
-        let alpha_pattern = Self::generate_alpha_mask(alpha_val, t_queries.query_length);
+        // Mask the pre-computed alpha pattern to the actual query length
+        let length_mask = if t_queries.query_length >= 64 {
+            !0
+        } else {
+            (1u64 << t_queries.query_length) - 1
+        };
+        let alpha_pattern = self.alpha_pattern & length_mask;
 
         self.ensure_capacity(num_blocks, t_queries.n_queries);
         self.reset_state(t_queries, alpha_pattern);
@@ -161,7 +170,8 @@ impl<B: SimdBackend> Searcher<B> {
             }
         }
 
-        if alpha.is_some() {
+        // Process overhangs if alpha is not 1.0 (i.e., if alpha_pattern is not all ones)
+        if self.alpha_pattern != !0 {
             self.process_overhangs(t_queries, k_simd, alpha_pattern, num_blocks);
         }
 
@@ -238,9 +248,9 @@ mod tests {
     fn test_simple_match() {
         let queries = vec![b"GGCC".to_vec(), b"TTAA".to_vec()];
         let transposed = TQueries::<U32>::new(&queries, false);
-        let mut searcher = Searcher::<U32>::new();
+        let mut searcher = Searcher::<U32>::new(None);
         let text = b"AAAAAAAGGCCAAAAAAAAAAA";
-        let matches = searcher.scan(&transposed, text, 1, None);
+        let matches = searcher.scan(&transposed, text, 1);
         assert!(matches[0]);
         assert!(!matches[1]);
     }
@@ -249,9 +259,9 @@ mod tests {
     fn test_simple_rc_match() {
         let queries = vec![b"GGCC".to_vec(), b"TTAA".to_vec()];
         let transposed = TQueries::<U32>::new(&queries, false);
-        let mut searcher = Searcher::<U32>::new();
+        let mut searcher = Searcher::<U32>::new(None);
         let text = b"TTTTTTTTTTTGGCCTTTTTTT"; // identical text to above, but rc'ed
-        let matches = searcher.scan(&transposed, text, 1, None);
+        let matches = searcher.scan(&transposed, text, 1);
         assert!(matches[0]);
         assert!(!matches[1]);
     }
@@ -260,11 +270,12 @@ mod tests {
     fn test_ovherhang_prefix() {
         let queries = vec![b"TTTTAA".to_vec()];
         let transposed = TQueries::<U32>::new(&queries, false);
-        let mut searcher = Searcher::<U32>::new();
+        let mut searcher = Searcher::<U32>::new(None);
         let text = b"AAAAAGGGG";
-        let matches = searcher.scan(&transposed, text, 2, None);
+        let matches = searcher.scan(&transposed, text, 2);
         assert!(!matches[0]); // no match
-        let matches = searcher.scan(&transposed, text, 2, Some(0.5));
+        let mut searcher_alpha = Searcher::<U32>::new(Some(0.5));
+        let matches = searcher_alpha.scan(&transposed, text, 2);
         assert!(matches[0]);
     }
 
@@ -272,11 +283,12 @@ mod tests {
     fn test_ovherhang_suffix() {
         let queries = vec![b"GGGGCC".to_vec()];
         let transposed = TQueries::<U32>::new(&queries, false);
-        let mut searcher = Searcher::<U32>::new();
+        let mut searcher = Searcher::<U32>::new(None);
         let text = b"AAAAAGGGG";
-        let matches = searcher.scan(&transposed, text, 1, None);
+        let matches = searcher.scan(&transposed, text, 1);
         assert!(!matches[0]); // no match
-        let matches = searcher.scan(&transposed, text, 1, Some(0.5));
+        let mut searcher_alpha = Searcher::<U32>::new(Some(0.5));
+        let matches = searcher_alpha.scan(&transposed, text, 1);
         assert!(matches[0]);
     }
 
@@ -284,11 +296,12 @@ mod tests {
     fn test_overhang_both_sides() {
         let queries = vec![b"GGGGCC".to_vec(), b"TTTTAA".to_vec()];
         let transposed = TQueries::<U32>::new(&queries, false);
-        let mut searcher = Searcher::<U32>::new();
+        let mut searcher = Searcher::<U32>::new(None);
         let text = b"AAAAAGGGG";
-        let matches = searcher.scan(&transposed, text, 1, None);
+        let matches = searcher.scan(&transposed, text, 1);
         println!("matches: {:?}", matches);
-        let matches = searcher.scan(&transposed, text, 1, Some(0.5));
+        let mut searcher_alpha = Searcher::<U32>::new(Some(0.5));
+        let matches = searcher_alpha.scan(&transposed, text, 1);
         println!("matches with alpha 0.5: {:?}", matches);
     }
 
@@ -296,9 +309,9 @@ mod tests {
     fn test_multi_match_lowest_reported() {
         let queries = vec![b"GGGGCC".to_vec()];
         let transposed = TQueries::<U32>::new(&queries, false);
-        let mut searcher = Searcher::<U32>::new();
+        let mut searcher = Searcher::<U32>::new(None);
         let text = b"AAAAAGGGG";
-        let matches = searcher.scan(&transposed, text, 1, None);
+        let matches = searcher.scan(&transposed, text, 1);
         println!("matches: {:?}", matches);
     }
 
@@ -325,9 +338,9 @@ mod tests {
         }
         println!("queries: {:?}", queries.len());
         let transposed = TQueries::<U32>::new(&queries, false);
-        let mut searcher = Searcher::<U32>::new();
+        let mut searcher = Searcher::<U32>::new(None);
         let text = random_dna_seq(1_000);
-        let matches = searcher.scan(&transposed, &text, 1, None);
+        let matches = searcher.scan(&transposed, &text, 1);
         assert_eq!(matches.len(), n_queries);
         println!("matches: {:?}", matches);
     }

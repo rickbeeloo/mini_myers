@@ -111,7 +111,7 @@ fn run_bench_round(
 
     // Create TQueries from the queries
     let t_queries = TQueries::<U32>::new(&queries, false);
-    let mut mini_searcher = mini_searcher::<U32>::new();
+    let mut mini_searcher = mini_searcher::<U32>::new(None);
 
     // Count matches for sassy (run once before timing)
     let mut sassy_match_count = 0;
@@ -121,11 +121,11 @@ fn run_bench_round(
     }
 
     // Count matches for mini_search (run once before timing)
-    let mini_search_result_sample = mini_searcher.scan(&t_queries, &target, k as u32, None);
+    let mini_search_result_sample = mini_searcher.scan(&t_queries, &target, k as u32);
     let mini_search_match_count = mini_search_result_sample.iter().filter(|&&x| x).count();
 
     // Count matches for mini_search_with_positions (run once before timing)
-    let mini_pos_result_sample = mini_searcher.scan(&t_queries, &target, k as u32, None);
+    let mini_pos_result_sample = mini_searcher.scan(&t_queries, &target, k as u32);
     let mini_pos_match_count = mini_pos_result_sample.iter().filter(|&&x| x).count();
 
     // Benchmark sassy
@@ -138,13 +138,13 @@ fn run_bench_round(
 
     // Benchmark mini_search (same as with positions - new API only has search)
     let mini_search_total = time_iterations(iterations, || {
-        let result = mini_searcher.scan(&t_queries, &target, k as u32, None);
+        let result = mini_searcher.scan(&t_queries, &target, k as u32);
         black_box(result);
     });
 
     // Benchmark mini_search_with_positions (same as above in new API)
     let mini_pos_total = time_iterations(iterations, || {
-        let result = mini_searcher.scan(&t_queries, &target, k as u32, None);
+        let result = mini_searcher.scan(&t_queries, &target, k as u32);
         black_box(result);
     });
 

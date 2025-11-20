@@ -27,7 +27,7 @@ fn main() {
     for _ in 0..n_queries {
         queries.push(generate_random_dna(query_len));
     }
-    let mut searcher = Searcher::<U32>::new();
+    let mut searcher = Searcher::<U32>::new(None);
     let t_queries = TQueries::<U32>::new(&queries, false);
     let mut target = generate_random_dna(100_000_000);
 
@@ -46,7 +46,7 @@ fn main() {
     // Insert the query at the selected position
     target[insert_pos..insert_pos + query_len].copy_from_slice(&queries[0]);
 
-    let results = searcher.scan(&t_queries, &target, 2, None);
+    let results = searcher.scan(&t_queries, &target, 2);
     println!("number of matches: {}", results.len());
     black_box(&results);
 }
