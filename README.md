@@ -2,7 +2,7 @@
 
 ### 🤏 Mini Myers
 SIMD Myers implementation to "check" whether "batches" of short patterns (<=32nt) are present in a longer 
-text with at most `k` edits, can report positions at 5% overhead.
+text with at most `k` edits.
 
 Mainly for [Barbell](https://github.com/rickbeeloo/barbell) as a faster pre-filter (2x) before running [sassy](https://github.com/RagnarGrootKoerkamp/sassy/).
 Most likely you are looking for [sassy](https://github.com/RagnarGrootKoerkamp/sassy/) instead, unless you want to batch search very short patterns.
@@ -18,9 +18,7 @@ Most likely you are looking for [sassy](https://github.com/RagnarGrootKoerkamp/s
 
 #### What it does
 We compare each character of the queries against a single text character at the time using SIMD.
-Then we track the lowest cost 
-we see along the entire text and report the cost when below the cut-off `k`, or `-1` if above `k` for 
-`mini_search`, at a ~5% overhead we can also track the positions in `mini_search_positions`. 
+Then we track the edit distance along the entire text and report whether each query matches (within `k` edits). 
 
 --- 
 
@@ -28,35 +26,30 @@ we see along the entire text and report the cost when below the cut-off `k`, or 
 
 
 #### Basic usage
-This will just return the lowest edits found (below `k`) for each query. 
+This will return boolean results indicating whether each query matches (within `k` edits). 
 
 
 ```rust
-use mini_myers::{Searcher, Scan, Positions};
+use mini_myers::{Searcher, TQueries};
 use mini_myers::backend::{U32, U64};
 
-// Create a searcher for scan mode with U32 backend
+// Create a searcher with U32 backend
 // that is 8 queries in parallel (8*32)
-let mut searcher = Searcher::<U32, Scan>::new();
+let mut searcher = Searcher::<U32>::new();
 let queries = vec![b"ATG".to_vec(), b"TTG".to_vec()];
-let encoded = searcher.encode(&queries, false); //true = also search rc
+let encoded = TQueries::<U32>::new(&queries, false); //true = also search rc
 let target = b"CCCTCGCCCCCCATGCCCCC";
 
-// Scan mode: get minimum cost per query
-let results = searcher.search(&encoded, target, 4, None);
-assert_eq!(results, vec![0.0, 1.0]);
-
-// Positions mode: get all match positions
-let mut pos_searcher = Searcher::<U32, Positions>::new();
-let encoded = pos_searcher.encode(&queries, false);
-let results = pos_searcher.search(&encoded, target, 4, None);
-println!("Found {} matches", results.len());
+// Scan mode: get boolean results indicating if each query matches (within k edits)
+let results = searcher.scan(&encoded, target, 4, None);
+assert!(results[0]); // "ATG" matches
+assert!(!results[1]); // "TTG" doesn't match
 
 // Use U64 backend for longer queries (up to 64 nucleotides)
-// that is 4 queries in parlalel (4*64)
-let mut searcher64 = Searcher::<U64, Scan>::new();
-let encoded = searcher64.encode(&queries, false);
-let results = searcher64.search(&encoded, target, 4, None);
+// that is 4 queries in parallel (4*64)
+let mut searcher64 = Searcher::<U64>::new();
+let encoded = TQueries::<U64>::new(&queries, false);
+let results = searcher64.scan(&encoded, target, 4, None);
 ```
 
 
@@ -70,7 +63,7 @@ a reduced penalty for characters "hanging over" the target sequence, i.e.:
 ```
 You can enable overhang by changing `None` in the above commands to `Some(overhang_cost)`, i.e. `Some(0.5)`:
 ```rust
-let results = searcher64.search(&encoded, target, 4, Some(0.5));
+let results = searcher64.scan(&encoded, target, 4, Some(0.5));
 ```
 In the example above, this would give a cost of `3 * 0.5 = 1.5`
 
