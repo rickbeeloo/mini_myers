@@ -13,14 +13,7 @@ pub struct Searcher<B: SimdBackend> {
 
 impl<B: SimdBackend> Default for Searcher<B> {
     fn default() -> Self {
-        Self {
-            vp: Vec::new(),
-            vn: Vec::new(),
-            score: Vec::new(),
-            match_masks: Vec::new(),
-            results: Vec::new(),
-            alpha_pattern: Self::generate_alpha_mask(1.0, 64),
-        }
+        Self::new(None)
     }
 }
 
@@ -55,63 +48,70 @@ impl<B: SimdBackend> Searcher<B> {
     #[inline(always)]
     fn reset_state(&mut self, t_queries: &TQueries<B>, alpha_pattern: u64) {
         let mask_len = t_queries.query_length;
-
-        let length_mask = if mask_len >= B::LIMB_BITS {
+        let length_mask = if mask_len >= 64 {
             !0
         } else {
             (1u64 << mask_len) - 1
         };
         let masked_alpha: u64 = alpha_pattern & length_mask;
-        let initial_score_val = masked_alpha.count_ones();
 
-        let initial_score = B::splat_from_usize(initial_score_val as usize);
-        let alpha_scalar = B::mask_word_to_scalar(alpha_pattern);
-        let alpha_simd = B::splat_scalar(alpha_scalar);
+        // Constants
+        let initial_score = B::splat_from_usize(masked_alpha.count_ones() as usize);
+        let alpha_simd = B::splat_scalar(B::mask_word_to_scalar(alpha_pattern));
         let zero = B::splat_zero();
 
         let num_blocks = t_queries.peqs[0].len();
 
-        for i in 0..num_blocks {
-            self.match_masks[i] = zero;
-            self.vp[i] = alpha_simd;
-            self.vn[i] = zero;
-            self.score[i] = initial_score;
+        for (((mask, vp), vn), score) in self
+            .match_masks
+            .iter_mut()
+            .zip(self.vp.iter_mut())
+            .zip(self.vn.iter_mut())
+            .zip(self.score.iter_mut())
+            .take(num_blocks)
+        {
+            *mask = zero;
+            *vp = alpha_simd;
+            *vn = zero;
+            *score = initial_score;
         }
     }
 
     #[inline(always)]
-    fn myers_col(
-        pv: &mut B::Simd,
-        mv: &mut B::Simd,
-        score: &mut B::Simd,
+    fn myers_step(
+        mut pv: B::Simd,
+        mut mv: B::Simd,
+        mut score: B::Simd,
         eq: B::Simd,
         last_bit_shift: u32,
         last_bit_mask: B::Simd,
-    ) {
+    ) -> (B::Simd, B::Simd, B::Simd) {
         let all_ones = B::splat_all_ones();
-        let eq_and_pv = eq & *pv;
-        let xh = ((eq_and_pv + *pv) ^ *pv) | eq;
-        let mh = *pv & xh;
-        let ph = *mv | (all_ones ^ (xh | *pv));
+
+        let eq_and_pv = eq & pv;
+        let xh = ((eq_and_pv + pv) ^ pv) | eq;
+        let mh = pv & xh;
+        let ph = mv | (all_ones ^ (xh | pv));
 
         let ph_shifted = ph << 1;
         let mh_shifted = mh << 1;
 
-        let xv = eq | *mv;
-        *pv = mh_shifted | (all_ones ^ (xv | ph_shifted));
-        *mv = ph_shifted & xv;
+        let xv = eq | mv;
+        pv = mh_shifted | (all_ones ^ (xv | ph_shifted));
+        mv = ph_shifted & xv;
 
         // Score update
         let ph_bit = (ph & last_bit_mask) >> last_bit_shift;
         let mh_bit = (mh & last_bit_mask) >> last_bit_shift;
-        *score = (*score + ph_bit) - mh_bit;
+        score = (score + ph_bit) - mh_bit;
+
+        (pv, mv, score)
     }
 
     #[inline(always)]
     fn generate_alpha_mask(alpha: f32, length: usize) -> u64 {
         let mut mask = 0u64;
         let limit = length.min(64);
-        // Same as sassy
         for i in 0..limit {
             let val = ((i + 1) as f32 * alpha).floor() as u64 - (i as f32 * alpha).floor() as u64;
             if val >= 1 {
@@ -125,7 +125,6 @@ impl<B: SimdBackend> Searcher<B> {
     pub fn scan(&mut self, t_queries: &TQueries<B>, text: &[u8], k: u32) -> &[bool] {
         let num_blocks = t_queries.peqs[0].len();
 
-        // Mask the pre-computed alpha pattern to the actual query length
         let length_mask = if t_queries.query_length >= 64 {
             !0
         } else {
@@ -142,47 +141,113 @@ impl<B: SimdBackend> Searcher<B> {
         let all_ones = B::splat_all_ones();
 
         if num_blocks == 1 {
-            for &c in text {
-                let encoded = crate::iupac::get_encoded(c);
-                let peq_block_list = unsafe { t_queries.peqs.get_unchecked(encoded as usize) };
-                let eq = peq_block_list[0];
+            let mut vp = self.vp[0];
+            let mut vn = self.vn[0];
+            let mut score = self.score[0];
+            let mut mask_acc = self.match_masks[0]; // Accumulator
 
-                Self::myers_col(
-                    &mut self.vp[0],
-                    &mut self.vn[0],
-                    &mut self.score[0],
-                    eq,
-                    last_bit_shift,
-                    last_bit_mask,
-                );
+            let chunks = text.chunks_exact(4);
+            let remainder = chunks.remainder();
 
-                let gt_mask = B::simd_gt(self.score[0], k_simd);
-                self.match_masks[0] |= gt_mask ^ all_ones;
+            // Assembly looks nicer, but not per se much faster
+            for chunk in chunks {
+                let eq0 = unsafe {
+                    *t_queries
+                        .peqs
+                        .get_unchecked(crate::iupac::get_encoded(chunk[0]) as usize)
+                        .get_unchecked(0)
+                };
+                let eq1 = unsafe {
+                    *t_queries
+                        .peqs
+                        .get_unchecked(crate::iupac::get_encoded(chunk[1]) as usize)
+                        .get_unchecked(0)
+                };
+                let eq2 = unsafe {
+                    *t_queries
+                        .peqs
+                        .get_unchecked(crate::iupac::get_encoded(chunk[2]) as usize)
+                        .get_unchecked(0)
+                };
+                let eq3 = unsafe {
+                    *t_queries
+                        .peqs
+                        .get_unchecked(crate::iupac::get_encoded(chunk[3]) as usize)
+                        .get_unchecked(0)
+                };
+
+                let res = Self::myers_step(vp, vn, score, eq0, last_bit_shift, last_bit_mask);
+                vp = res.0;
+                vn = res.1;
+                score = res.2;
+                let gt_mask = B::simd_gt(score, k_simd);
+                mask_acc |= gt_mask ^ all_ones;
+
+                let res = Self::myers_step(vp, vn, score, eq1, last_bit_shift, last_bit_mask);
+                vp = res.0;
+                vn = res.1;
+                score = res.2;
+                let gt_mask = B::simd_gt(score, k_simd);
+                mask_acc |= gt_mask ^ all_ones;
+
+                let res = Self::myers_step(vp, vn, score, eq2, last_bit_shift, last_bit_mask);
+                vp = res.0;
+                vn = res.1;
+                score = res.2;
+                let gt_mask = B::simd_gt(score, k_simd);
+                mask_acc |= gt_mask ^ all_ones;
+
+                let res = Self::myers_step(vp, vn, score, eq3, last_bit_shift, last_bit_mask);
+                vp = res.0;
+                vn = res.1;
+                score = res.2;
+                let gt_mask = B::simd_gt(score, k_simd);
+                mask_acc |= gt_mask ^ all_ones;
             }
+
+            // Handle remaining bytes
+            for &c in remainder {
+                let eq = unsafe {
+                    *t_queries
+                        .peqs
+                        .get_unchecked(crate::iupac::get_encoded(c) as usize)
+                        .get_unchecked(0)
+                };
+                let res = Self::myers_step(vp, vn, score, eq, last_bit_shift, last_bit_mask);
+                vp = res.0;
+                vn = res.1;
+                score = res.2;
+                let gt_mask = B::simd_gt(score, k_simd);
+                mask_acc |= gt_mask ^ all_ones;
+            }
+
+            self.vp[0] = vp;
+            self.vn[0] = vn;
+            self.score[0] = score;
+            self.match_masks[0] = mask_acc;
         } else {
             for &c in text {
-                let encoded = crate::iupac::get_encoded(c);
-                let peq_block_list = unsafe { t_queries.peqs.get_unchecked(encoded as usize) };
-
-                let vp_slice = &mut self.vp[..num_blocks];
-                let vn_slice = &mut self.vn[..num_blocks];
-                let score_slice = &mut self.score[..num_blocks];
-                let mask_slice = &mut self.match_masks[..num_blocks];
+                let encoded = crate::iupac::get_encoded(c) as usize;
+                let peq_block_list = unsafe { t_queries.peqs.get_unchecked(encoded) };
 
                 for block_i in 0..num_blocks {
-                    let eq = peq_block_list[block_i];
+                    let eq = unsafe { *peq_block_list.get_unchecked(block_i) };
 
-                    Self::myers_col(
-                        &mut vp_slice[block_i],
-                        &mut vn_slice[block_i],
-                        &mut score_slice[block_i],
-                        eq,
-                        last_bit_shift,
-                        last_bit_mask,
-                    );
+                    let vp_in = unsafe { *self.vp.get_unchecked(block_i) };
+                    let vn_in = unsafe { *self.vn.get_unchecked(block_i) };
+                    let score_in = unsafe { *self.score.get_unchecked(block_i) };
 
-                    let gt_mask = B::simd_gt(score_slice[block_i], k_simd);
-                    mask_slice[block_i] |= gt_mask ^ all_ones;
+                    let (vp_out, vn_out, score_out) =
+                        Self::myers_step(vp_in, vn_in, score_in, eq, last_bit_shift, last_bit_mask);
+
+                    unsafe {
+                        *self.vp.get_unchecked_mut(block_i) = vp_out;
+                        *self.vn.get_unchecked_mut(block_i) = vn_out;
+                        *self.score.get_unchecked_mut(block_i) = score_out;
+
+                        let gt_mask = B::simd_gt(score_out, k_simd);
+                        *self.match_masks.get_unchecked_mut(block_i) |= gt_mask ^ all_ones;
+                    }
                 }
             }
         }
@@ -203,45 +268,47 @@ impl<B: SimdBackend> Searcher<B> {
         num_blocks: usize,
     ) {
         let all_ones = B::splat_all_ones();
-        let alpha_scalar = B::mask_word_to_scalar(alpha);
-        let eq = B::splat_scalar(alpha_scalar);
+        let eq = B::splat_scalar(B::mask_word_to_scalar(alpha));
         let last_bit_shift = (t_queries.query_length - 1) as u32;
         let last_bit_mask = B::splat_one() << last_bit_shift;
         let steps_needed = t_queries.query_length;
 
         if num_blocks == 1 {
-            for _ in 0..steps_needed {
-                Self::myers_col(
-                    &mut self.vp[0],
-                    &mut self.vn[0],
-                    &mut self.score[0],
-                    eq,
-                    last_bit_shift,
-                    last_bit_mask,
-                );
+            let mut vp = self.vp[0];
+            let mut vn = self.vn[0];
+            let mut score = self.score[0];
+            let mut mask_acc = self.match_masks[0];
 
-                let gt_mask = B::simd_gt(self.score[0], k_simd);
-                self.match_masks[0] |= gt_mask ^ all_ones;
+            for _ in 0..steps_needed {
+                let res = Self::myers_step(vp, vn, score, eq, last_bit_shift, last_bit_mask);
+                vp = res.0;
+                vn = res.1;
+                score = res.2;
+                let gt_mask = B::simd_gt(score, k_simd);
+                mask_acc |= gt_mask ^ all_ones;
             }
+
+            self.vp[0] = vp;
+            self.vn[0] = vn;
+            self.score[0] = score;
+            self.match_masks[0] = mask_acc;
         } else {
             for _ in 0..steps_needed {
-                let vp_slice = &mut self.vp[..num_blocks];
-                let vn_slice = &mut self.vn[..num_blocks];
-                let score_slice = &mut self.score[..num_blocks];
-                let mask_slice = &mut self.match_masks[..num_blocks];
-
                 for block_i in 0..num_blocks {
-                    Self::myers_col(
-                        &mut vp_slice[block_i],
-                        &mut vn_slice[block_i],
-                        &mut score_slice[block_i],
-                        eq,
-                        last_bit_shift,
-                        last_bit_mask,
-                    );
+                    let vp_in = unsafe { *self.vp.get_unchecked(block_i) };
+                    let vn_in = unsafe { *self.vn.get_unchecked(block_i) };
+                    let score_in = unsafe { *self.score.get_unchecked(block_i) };
 
-                    let gt_mask = B::simd_gt(score_slice[block_i], k_simd);
-                    mask_slice[block_i] |= gt_mask ^ all_ones;
+                    let (vp_out, vn_out, score_out) =
+                        Self::myers_step(vp_in, vn_in, score_in, eq, last_bit_shift, last_bit_mask);
+
+                    unsafe {
+                        *self.vp.get_unchecked_mut(block_i) = vp_out;
+                        *self.vn.get_unchecked_mut(block_i) = vn_out;
+                        *self.score.get_unchecked_mut(block_i) = score_out;
+                        let gt_mask = B::simd_gt(score_out, k_simd);
+                        *self.match_masks.get_unchecked_mut(block_i) |= gt_mask ^ all_ones;
+                    }
                 }
             }
         }
@@ -250,7 +317,6 @@ impl<B: SimdBackend> Searcher<B> {
     #[inline(always)]
     fn extract_bools(&mut self, t_queries: &TQueries<B>) -> &[bool] {
         self.results.clear();
-
         self.results.reserve_exact(t_queries.n_queries);
 
         let zero = B::splat_zero();
@@ -270,7 +336,8 @@ impl<B: SimdBackend> Searcher<B> {
             let lanes_to_process = B::LANES.min(remaining);
 
             for lane_i in 0..lanes_to_process {
-                self.results.push(mask_slice[lane_i] == zero_scalar);
+                self.results
+                    .push(unsafe { *mask_slice.get_unchecked(lane_i) } == zero_scalar);
             }
 
             remaining -= lanes_to_process;
