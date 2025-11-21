@@ -1,11 +1,11 @@
 use crate::backend::SimdBackend;
 use crate::tqueries::TQueries;
+use wide::CmpEq;
 
 pub struct Searcher<B: SimdBackend> {
     vp: Vec<B::Simd>,
     vn: Vec<B::Simd>,
     score: Vec<B::Simd>,
-
     match_masks: Vec<B::Simd>,
     results: Vec<bool>,
     alpha_pattern: u64,
@@ -71,18 +71,11 @@ impl<B: SimdBackend> Searcher<B> {
 
         let num_blocks = t_queries.peqs[0].len();
 
-        let vp_ptr = self.vp.as_mut_ptr();
-        let vn_ptr = self.vn.as_mut_ptr();
-        let score_ptr = self.score.as_mut_ptr();
-        let masks_ptr = self.match_masks.as_mut_ptr();
-
-        unsafe {
-            for i in 0..num_blocks {
-                *masks_ptr.add(i) = zero;
-                *vp_ptr.add(i) = alpha_simd;
-                *vn_ptr.add(i) = zero;
-                *score_ptr.add(i) = initial_score;
-            }
+        for i in 0..num_blocks {
+            self.match_masks[i] = zero;
+            self.vp[i] = alpha_simd;
+            self.vn[i] = zero;
+            self.score[i] = initial_score;
         }
     }
 
@@ -108,7 +101,7 @@ impl<B: SimdBackend> Searcher<B> {
         *pv = mh_shifted | (all_ones ^ (xv | ph_shifted));
         *mv = ph_shifted & xv;
 
-        // Score update - keep separate
+        // Score update
         let ph_bit = (ph & last_bit_mask) >> last_bit_shift;
         let mh_bit = (mh & last_bit_mask) >> last_bit_shift;
         *score = (*score + ph_bit) - mh_bit;
@@ -118,6 +111,7 @@ impl<B: SimdBackend> Searcher<B> {
     fn generate_alpha_mask(alpha: f32, length: usize) -> u64 {
         let mut mask = 0u64;
         let limit = length.min(64);
+        // Same as sassy
         for i in 0..limit {
             let val = ((i + 1) as f32 * alpha).floor() as u64 - (i as f32 * alpha).floor() as u64;
             if val >= 1 {
@@ -130,6 +124,7 @@ impl<B: SimdBackend> Searcher<B> {
     #[inline(never)]
     pub fn scan(&mut self, t_queries: &TQueries<B>, text: &[u8], k: u32) -> &[bool] {
         let num_blocks = t_queries.peqs[0].len();
+
         // Mask the pre-computed alpha pattern to the actual query length
         let length_mask = if t_queries.query_length >= 64 {
             !0
@@ -146,36 +141,56 @@ impl<B: SimdBackend> Searcher<B> {
         let last_bit_mask = B::splat_one() << last_bit_shift;
         let all_ones = B::splat_all_ones();
 
-        let vp_ptr = self.vp.as_mut_ptr();
-        let vn_ptr = self.vn.as_mut_ptr();
-        let score_ptr = self.score.as_mut_ptr();
-        let masks_ptr = self.match_masks.as_mut_ptr();
+        if num_blocks == 1 {
+            for &c in text {
+                let encoded = crate::iupac::get_encoded(c);
+                let peq_block_list = unsafe { t_queries.peqs.get_unchecked(encoded as usize) };
+                let eq = peq_block_list[0];
 
-        // Main Loop
-        for &c in text {
-            let encoded = crate::iupac::get_encoded(c);
+                Self::myers_col(
+                    &mut self.vp[0],
+                    &mut self.vn[0],
+                    &mut self.score[0],
+                    eq,
+                    last_bit_shift,
+                    last_bit_mask,
+                );
 
-            let peq_block_list = unsafe { t_queries.peqs.get_unchecked(encoded as usize) };
+                let gt_mask = B::simd_gt(self.score[0], k_simd);
+                self.match_masks[0] |= gt_mask ^ all_ones;
+            }
+        } else {
+            for &c in text {
+                let encoded = crate::iupac::get_encoded(c);
+                let peq_block_list = unsafe { t_queries.peqs.get_unchecked(encoded as usize) };
 
-            for block_i in 0..num_blocks {
-                let eq = peq_block_list[block_i];
-                let vp = &mut self.vp[block_i];
-                let vn = &mut self.vn[block_i];
-                let score = &mut self.score[block_i];
+                let vp_slice = &mut self.vp[..num_blocks];
+                let vn_slice = &mut self.vn[..num_blocks];
+                let score_slice = &mut self.score[..num_blocks];
+                let mask_slice = &mut self.match_masks[..num_blocks];
 
-                Self::myers_col(vp, vn, score, eq, last_bit_shift, last_bit_mask);
+                for block_i in 0..num_blocks {
+                    let eq = peq_block_list[block_i];
 
-                let gt_mask = B::simd_gt(*score, k_simd);
-                self.match_masks[block_i] |= gt_mask ^ all_ones;
+                    Self::myers_col(
+                        &mut vp_slice[block_i],
+                        &mut vn_slice[block_i],
+                        &mut score_slice[block_i],
+                        eq,
+                        last_bit_shift,
+                        last_bit_mask,
+                    );
+
+                    let gt_mask = B::simd_gt(score_slice[block_i], k_simd);
+                    mask_slice[block_i] |= gt_mask ^ all_ones;
+                }
             }
         }
 
-        // Process overhangs if alpha is not 1.0 (i.e., if alpha_pattern is not all ones)
         if self.alpha_pattern != !0 {
             self.process_overhangs(t_queries, k_simd, alpha_pattern, num_blocks);
         }
 
-        // Extract to internal buffer and return slice
         self.extract_bools(t_queries)
     }
 
@@ -194,24 +209,39 @@ impl<B: SimdBackend> Searcher<B> {
         let last_bit_mask = B::splat_one() << last_bit_shift;
         let steps_needed = t_queries.query_length;
 
-        let vp_ptr = self.vp.as_mut_ptr();
-        let vn_ptr = self.vn.as_mut_ptr();
-        let score_ptr = self.score.as_mut_ptr();
-        let masks_ptr = self.match_masks.as_mut_ptr();
+        if num_blocks == 1 {
+            for _ in 0..steps_needed {
+                Self::myers_col(
+                    &mut self.vp[0],
+                    &mut self.vn[0],
+                    &mut self.score[0],
+                    eq,
+                    last_bit_shift,
+                    last_bit_mask,
+                );
 
-        for _ in 0..steps_needed {
-            unsafe {
+                let gt_mask = B::simd_gt(self.score[0], k_simd);
+                self.match_masks[0] |= gt_mask ^ all_ones;
+            }
+        } else {
+            for _ in 0..steps_needed {
+                let vp_slice = &mut self.vp[..num_blocks];
+                let vn_slice = &mut self.vn[..num_blocks];
+                let score_slice = &mut self.score[..num_blocks];
+                let mask_slice = &mut self.match_masks[..num_blocks];
+
                 for block_i in 0..num_blocks {
-                    let vp_ref = &mut *vp_ptr.add(block_i);
-                    let vn_ref = &mut *vn_ptr.add(block_i);
-                    let score_ref = &mut *score_ptr.add(block_i);
+                    Self::myers_col(
+                        &mut vp_slice[block_i],
+                        &mut vn_slice[block_i],
+                        &mut score_slice[block_i],
+                        eq,
+                        last_bit_shift,
+                        last_bit_mask,
+                    );
 
-                    Self::myers_col(vp_ref, vn_ref, score_ref, eq, last_bit_shift, last_bit_mask);
-
-                    let score = *score_ref;
-                    let gt_mask = B::simd_gt(score, k_simd);
-                    let le_mask = gt_mask ^ all_ones;
-                    *masks_ptr.add(block_i) = *masks_ptr.add(block_i) | le_mask;
+                    let gt_mask = B::simd_gt(score_slice[block_i], k_simd);
+                    mask_slice[block_i] |= gt_mask ^ all_ones;
                 }
             }
         }
@@ -219,20 +249,31 @@ impl<B: SimdBackend> Searcher<B> {
 
     #[inline(always)]
     fn extract_bools(&mut self, t_queries: &TQueries<B>) -> &[bool] {
-        let total_queries = t_queries.n_queries;
-        let zero_scalar = B::scalar_from_i64(0);
         self.results.clear();
 
-        for &mask_simd in self.match_masks.iter() {
-            let lanes_array = B::to_array(mask_simd);
-            let lanes_slice = lanes_array.as_ref();
+        self.results.reserve_exact(t_queries.n_queries);
 
-            for lane_i in 0..B::LANES {
-                if self.results.len() == total_queries {
-                    break;
-                }
-                self.results.push(lanes_slice[lane_i] != zero_scalar);
+        let zero = B::splat_zero();
+        let zero_scalar = B::scalar_from_i64(0);
+
+        let mut remaining = t_queries.n_queries;
+
+        for &mask_simd in self.match_masks.iter() {
+            if remaining == 0 {
+                break;
             }
+
+            let ne_mask = mask_simd.simd_eq(zero);
+            let mask_array = B::to_array(ne_mask);
+            let mask_slice = mask_array.as_ref();
+
+            let lanes_to_process = B::LANES.min(remaining);
+
+            for lane_i in 0..lanes_to_process {
+                self.results.push(mask_slice[lane_i] == zero_scalar);
+            }
+
+            remaining -= lanes_to_process;
         }
 
         &self.results
@@ -260,35 +301,39 @@ mod tests {
         let queries = vec![b"GGCC".to_vec(), b"TTAA".to_vec()];
         let transposed = TQueries::<U32>::new(&queries, false);
         let mut searcher = Searcher::<U32>::new(None);
-        let text = b"TTTTTTTTTTTGGCCTTTTTTT"; // identical text to above, but rc'ed
+        let text = b"TTTTTTTTTTTGGCCTTTTTTT";
         let matches = searcher.scan(&transposed, text, 1);
         assert!(matches[0]);
         assert!(!matches[1]);
     }
 
     #[test]
-    fn test_ovherhang_prefix() {
+    fn test_overhang_prefix() {
         let queries = vec![b"TTTTAA".to_vec()];
         let transposed = TQueries::<U32>::new(&queries, false);
+
         let mut searcher = Searcher::<U32>::new(None);
         let text = b"AAAAAGGGG";
         let matches = searcher.scan(&transposed, text, 2);
-        assert!(!matches[0]); // no match
-        let mut searcher_alpha = Searcher::<U32>::new(Some(0.5));
-        let matches = searcher_alpha.scan(&transposed, text, 2);
+        assert!(!matches[0]);
+
+        let mut searcher = Searcher::<U32>::new(Some(0.5));
+        let matches = searcher.scan(&transposed, text, 2);
         assert!(matches[0]);
     }
 
     #[test]
-    fn test_ovherhang_suffix() {
+    fn test_overhang_suffix() {
         let queries = vec![b"GGGGCC".to_vec()];
         let transposed = TQueries::<U32>::new(&queries, false);
+
         let mut searcher = Searcher::<U32>::new(None);
         let text = b"AAAAAGGGG";
         let matches = searcher.scan(&transposed, text, 1);
-        assert!(!matches[0]); // no match
-        let mut searcher_alpha = Searcher::<U32>::new(Some(0.5));
-        let matches = searcher_alpha.scan(&transposed, text, 1);
+        assert!(!matches[0]);
+
+        let mut searcher = Searcher::<U32>::new(Some(0.5));
+        let matches = searcher.scan(&transposed, text, 1);
         assert!(matches[0]);
     }
 
@@ -296,23 +341,10 @@ mod tests {
     fn test_overhang_both_sides() {
         let queries = vec![b"GGGGCC".to_vec(), b"TTTTAA".to_vec()];
         let transposed = TQueries::<U32>::new(&queries, false);
-        let mut searcher = Searcher::<U32>::new(None);
+        let mut searcher = Searcher::<U32>::new(Some(0.5));
         let text = b"AAAAAGGGG";
         let matches = searcher.scan(&transposed, text, 1);
-        println!("matches: {:?}", matches);
-        let mut searcher_alpha = Searcher::<U32>::new(Some(0.5));
-        let matches = searcher_alpha.scan(&transposed, text, 1);
         println!("matches with alpha 0.5: {:?}", matches);
-    }
-
-    #[test]
-    fn test_multi_match_lowest_reported() {
-        let queries = vec![b"GGGGCC".to_vec()];
-        let transposed = TQueries::<U32>::new(&queries, false);
-        let mut searcher = Searcher::<U32>::new(None);
-        let text = b"AAAAAGGGG";
-        let matches = searcher.scan(&transposed, text, 1);
-        println!("matches: {:?}", matches);
     }
 
     fn random_dna_seq(l: usize) -> Vec<u8> {
@@ -330,18 +362,16 @@ mod tests {
 
     #[test]
     fn test_more_than_single_block_queries() {
-        let n_queries = 32 * 2 + 1; // +1 to check padding as well
-        let query_len = 32; // Still filling whole lane
+        let n_queries = 32 * 2 + 1;
+        let query_len = 32;
         let mut queries = Vec::with_capacity(n_queries);
         for _ in 0..n_queries {
             queries.push(random_dna_seq(query_len));
         }
-        println!("queries: {:?}", queries.len());
         let transposed = TQueries::<U32>::new(&queries, false);
         let mut searcher = Searcher::<U32>::new(None);
         let text = random_dna_seq(1_000);
         let matches = searcher.scan(&transposed, &text, 1);
         assert_eq!(matches.len(), n_queries);
-        println!("matches: {:?}", matches);
     }
 }

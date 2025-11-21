@@ -47,7 +47,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     let target_lens = vec![32, 64, 100, 1000, 10_000, 100_000];
     let query_lens = vec![32];
-    let ks = vec![4];
+    let ks = vec![4, 8];
     let iterations = 100;
     let n_queries = 96;
 
@@ -110,7 +110,7 @@ fn run_bench_round(
     let mut searcher = Searcher::<Iupac>::new_rc();
 
     // Create TQueries from the queries
-    let t_queries = TQueries::<U32>::new(&queries, false);
+    let t_queries = TQueries::<U32>::new(&queries, true);
     let mut mini_searcher = mini_searcher::<U32>::new(None);
 
     // Count matches for sassy (run once before timing)
@@ -136,13 +136,13 @@ fn run_bench_round(
         }
     });
 
-    // Benchmark mini_search (same as with positions - new API only has search)
+    // Benchmark mini_search
     let mini_search_total = time_iterations(iterations, || {
         let result = mini_searcher.scan(&t_queries, &target, k as u32);
         black_box(result);
     });
 
-    // Benchmark mini_search_with_positions (same as above in new API)
+    // Repeat, fix later adding search?
     let mini_pos_total = time_iterations(iterations, || {
         let result = mini_searcher.scan(&t_queries, &target, k as u32);
         black_box(result);

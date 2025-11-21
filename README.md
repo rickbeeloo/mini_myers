@@ -75,14 +75,15 @@ Note that `mini_myers` and `sassy` are not directly comparable.
 The `mini_myers` "scan" mode just returns whether a match is present `<=k`, whereas sassy 
 finds the positions and performs traceback (of course much more compute).
 
-| Query length | Target length | Sassy (µs/query) | Mini scan (µs/query) | Speedup (Mini × Sassy) |
-|--------------|--------------|------------------|----------------------|------------------------|
-| 32           | 32           |   11.79          |   1.83               | 6.4×                   |
-| 32           | 64           |   11.22          |   1.74               | 6.4×                   |
-| 32           | 100          |   10.64          |   1.61               | 6.6×                   |
-| 32           | 1,000        |   12.58          |   2.00               | 6.3×                   |
-| 32           | 10,000       |   21.31          |   3.76               | 5.7×                   |
-| 32           | 100,000      |  114.81          |  23.22               | 4.9×                   |
+| Query length | Target length | Mini scan (µs/query) | Sassy (µs/query) | Speedup (Mini × Sassy) |
+|--------------|--------------|----------------------|------------------|------------------------|
+| 32           | 32           |   12.07              |   39.88          | 3.3×                   |
+| 32           | 64           |   11.54              |   36.09          | 3.1×                   |
+| 32           | 100          |   10.68              |   34.07          | 3.2×                   |
+| 32           | 1,000        |   13.03              |   39.81          | 3.1×                   |
+| 32           | 10,000       |   23.59              |   68.36          | 2.9×                   |
+| 32           | 100,000      |   49.90              |  190.70          | 3.8×                   |
+
 
 
 Run the bench using `cargo bench --bench sassy`. 
