@@ -1,6 +1,6 @@
 use clap::Parser;
 use mini_myers::backend::{U16, U32, U64};
-use mini_myers::search::Searcher;
+use mini_myers::scan::Searcher;
 use mini_myers::tqueries::TQueries;
 use needletail::parse_fastx_file;
 use std::fs::File;

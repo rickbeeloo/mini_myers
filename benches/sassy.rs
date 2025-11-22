@@ -1,5 +1,5 @@
 use mini_myers::backend::{U16, U32};
-use mini_myers::search::Searcher as mini_searcher;
+use mini_myers::scan::Searcher as mini_searcher;
 use mini_myers::TQueries;
 use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
