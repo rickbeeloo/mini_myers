@@ -2,11 +2,16 @@ use crate::backend::SimdBackend;
 use crate::constant::IUPAC_MASKS;
 use crate::tqueries::TQueries;
 
+#[derive(Clone, Copy)]
+struct BlockState<S: Copy> {
+    vp: S,
+    vn: S,
+    score: S,
+    failure_mask: S,
+}
+
 pub struct Searcher<B: SimdBackend> {
-    vp: Vec<B::Simd>,
-    vn: Vec<B::Simd>,
-    score: Vec<B::Simd>,
-    failure_masks: Vec<B::Simd>, // 1 = no match <=k (i.e. >k), 0 = match <=k
+    blocks: Vec<BlockState<B::Simd>>,
     results: Vec<bool>,
     alpha_pattern: u64,
 }
@@ -19,12 +24,9 @@ impl<B: SimdBackend> Default for Searcher<B> {
 
 impl<B: SimdBackend> Searcher<B> {
     pub fn new(alpha: Option<f32>) -> Self {
-        let alpha_val = alpha.unwrap_or(1.0); // default uses 111.. start penalties (i.e. no overhang reduction)
+        let alpha_val = alpha.unwrap_or(1.0);
         Self {
-            vp: Vec::new(),
-            vn: Vec::new(),
-            score: Vec::new(),
-            failure_masks: Vec::new(),
+            blocks: Vec::new(),
             results: Vec::new(),
             alpha_pattern: Self::generate_alpha_mask(alpha_val, 64),
         }
@@ -32,13 +34,18 @@ impl<B: SimdBackend> Searcher<B> {
 
     #[inline(always)]
     fn ensure_capacity(&mut self, num_blocks: usize, total_queries: usize) {
-        if self.vp.len() < num_blocks {
+        if self.blocks.len() < num_blocks {
             let all_ones = B::splat_all_ones();
             let zero = B::splat_zero();
-            self.vp.resize(num_blocks, all_ones);
-            self.vn.resize(num_blocks, zero);
-            self.score.resize(num_blocks, zero);
-            self.failure_masks.resize(num_blocks, all_ones);
+            self.blocks.resize(
+                num_blocks,
+                BlockState {
+                    vp: all_ones,
+                    vn: zero,
+                    score: zero,
+                    failure_mask: all_ones,
+                },
+            );
         }
         if self.results.capacity() < total_queries {
             self.results.reserve(total_queries - self.results.len());
@@ -60,12 +67,14 @@ impl<B: SimdBackend> Searcher<B> {
         let zero = B::splat_zero();
         let all_ones = B::splat_all_ones();
         let num_blocks = t_queries.n_simd_blocks;
-        unsafe {
-            for i in 0..num_blocks {
-                *self.failure_masks.get_unchecked_mut(i) = all_ones; // all start as fails, if match <=k, it will be false
-                *self.vp.get_unchecked_mut(i) = alpha_simd;
-                *self.vn.get_unchecked_mut(i) = zero;
-                *self.score.get_unchecked_mut(i) = initial_score;
+
+        for i in 0..num_blocks {
+            unsafe {
+                let block = self.blocks.get_unchecked_mut(i);
+                block.failure_mask = all_ones;
+                block.vp = alpha_simd;
+                block.vn = zero;
+                block.score = initial_score;
             }
         }
     }
@@ -101,7 +110,7 @@ impl<B: SimdBackend> Searcher<B> {
         (vp_out, vn_out, score_out)
     }
 
-    #[inline(always)] // to run just search_asm have to use inline(never)
+    #[inline(always)]
     pub fn scan(&mut self, t_queries: &TQueries<B>, text: &[u8], k: u32) -> &[bool] {
         let num_blocks = t_queries.n_simd_blocks;
         let length_mask = (!0u64) >> (64usize.saturating_sub(t_queries.query_length));
@@ -114,37 +123,36 @@ impl<B: SimdBackend> Searcher<B> {
         let last_bit_shift = (t_queries.query_length - 1) as u32;
         let last_bit_mask = B::splat_one() << last_bit_shift;
         let peqs_ptr: *const <B as SimdBackend>::Simd = t_queries.peqs.as_ptr();
-
-        // Pointers are a bit meh but even unchecked cost quite a bit more
-        let vp_ptr = self.vp.as_mut_ptr();
-        let vn_ptr = self.vn.as_mut_ptr();
-        let score_ptr = self.score.as_mut_ptr();
-        let fail_ptr = self.failure_masks.as_mut_ptr();
+        let blocks_ptr = self.blocks.as_mut_ptr();
 
         for &c in text {
             let encoded = crate::iupac::get_encoded(c) as usize;
-            let peq_offset_base = encoded; // Just the character offset
+            let peq_offset_base = encoded;
 
             for block_i in 0..num_blocks {
                 unsafe {
                     let eq = *peqs_ptr.add(block_i * IUPAC_MASKS + peq_offset_base);
-                    let vp_in = *vp_ptr.add(block_i);
-                    let vn_in = *vn_ptr.add(block_i);
-                    let score_in = *score_ptr.add(block_i);
+                    let block = &mut *blocks_ptr.add(block_i);
 
-                    let (vp_out, vn_out, score_out) =
-                        Self::myers_step(vp_in, vn_in, score_in, eq, last_bit_shift, last_bit_mask);
+                    let (vp_out, vn_out, score_out) = Self::myers_step(
+                        block.vp,
+                        block.vn,
+                        block.score,
+                        eq,
+                        last_bit_shift,
+                        last_bit_mask,
+                    );
 
-                    *vp_ptr.add(block_i) = vp_out;
-                    *vn_ptr.add(block_i) = vn_out;
-                    *score_ptr.add(block_i) = score_out;
+                    block.vp = vp_out;
+                    block.vn = vn_out;
+                    block.score = score_out;
 
                     let gt_mask = B::simd_gt(score_out, k_simd);
-                    let fail_in = *fail_ptr.add(block_i);
-                    *fail_ptr.add(block_i) = fail_in & gt_mask;
+                    block.failure_mask &= gt_mask;
                 }
             }
         }
+
         if self.alpha_pattern != !0 {
             self.process_overhangs(t_queries, k_simd, alpha_pattern, num_blocks);
         }
@@ -160,34 +168,33 @@ impl<B: SimdBackend> Searcher<B> {
         alpha: u64,
         num_blocks: usize,
     ) {
-        // We can just directly use the alpha mask as `eq`, as this already reflects alternating "matches" and "mismatches"
         let eq = B::splat_scalar(B::mask_word_to_scalar(alpha));
         let last_bit_shift = (t_queries.query_length - 1) as u32;
         let last_bit_mask = B::splat_one() << last_bit_shift;
         let steps_needed = t_queries.query_length;
 
-        let vp_ptr = self.vp.as_mut_ptr();
-        let vn_ptr = self.vn.as_mut_ptr();
-        let score_ptr = self.score.as_mut_ptr();
-        let fail_ptr = self.failure_masks.as_mut_ptr();
+        let blocks_ptr = self.blocks.as_mut_ptr();
 
         for _ in 0..steps_needed {
             for block_i in 0..num_blocks {
                 unsafe {
-                    let vp_in = *vp_ptr.add(block_i);
-                    let vn_in = *vn_ptr.add(block_i);
-                    let score_in = *score_ptr.add(block_i);
+                    let block = &mut *blocks_ptr.add(block_i);
 
-                    let (vp_out, vn_out, score_out) =
-                        Self::myers_step(vp_in, vn_in, score_in, eq, last_bit_shift, last_bit_mask);
+                    let (vp_out, vn_out, score_out) = Self::myers_step(
+                        block.vp,
+                        block.vn,
+                        block.score,
+                        eq,
+                        last_bit_shift,
+                        last_bit_mask,
+                    );
 
-                    *vp_ptr.add(block_i) = vp_out;
-                    *vn_ptr.add(block_i) = vn_out;
-                    *score_ptr.add(block_i) = score_out;
+                    block.vp = vp_out;
+                    block.vn = vn_out;
+                    block.score = score_out;
 
-                    let fail_in = *fail_ptr.add(block_i);
                     let gt_mask = B::simd_gt(score_out, k_simd);
-                    *fail_ptr.add(block_i) = fail_in & gt_mask;
+                    block.failure_mask &= gt_mask;
                 }
             }
         }
@@ -203,18 +210,17 @@ impl<B: SimdBackend> Searcher<B> {
         let mut remaining = n_queries;
         let mut results_ptr = self.results.as_mut_ptr();
 
-        for &fail_simd in self.failure_masks.iter() {
+        for block in &self.blocks {
             if remaining == 0 {
                 break;
             }
 
-            let fail_array = B::to_array(fail_simd);
+            let fail_array = B::to_array(block.failure_mask);
             let fail_slice = fail_array.as_ref();
             let lanes_to_process = B::LANES.min(remaining);
 
             for lane_i in 0..lanes_to_process {
                 unsafe {
-                    // if fail_mask is 0 -> matched <=k, which is what we want to report
                     let val = *fail_slice.get_unchecked(lane_i);
                     *results_ptr = val == zero_scalar;
                     results_ptr = results_ptr.add(1);
@@ -239,7 +245,6 @@ impl<B: SimdBackend> Searcher<B> {
     }
 }
 
-#[cfg(test)]
 mod tests {
     use super::*;
     use crate::backend::U32;
