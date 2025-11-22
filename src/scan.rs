@@ -154,6 +154,80 @@ impl<B: SimdBackend> Searcher<B> {
         self.extract_bools(t_queries)
     }
 
+    pub fn multi_text_scan(&mut self, t_queries: &TQueries<B>, texts: &[&[u8]], k: u32) -> &[bool] {
+        assert_eq!(
+            texts.len(),
+            t_queries.n_queries,
+            "Number of texts must match number of queries"
+        );
+
+        let num_blocks = t_queries.n_simd_blocks;
+
+        let length_mask = (!0u64) >> (64usize.saturating_sub(t_queries.query_length));
+        let alpha_pattern = self.alpha_pattern & length_mask;
+
+        self.ensure_capacity(num_blocks, t_queries.n_queries);
+        self.reset_state(t_queries, alpha_pattern);
+
+        let k_simd = B::splat_scalar(B::scalar_from_i64(k as i64));
+        let last_bit_shift = (t_queries.query_length - 1) as u32;
+        let last_bit_mask = B::splat_one() << last_bit_shift;
+
+        let blocks_ptr = self.blocks.as_mut_ptr();
+
+        let max_len = texts.iter().map(|t| t.len()).max().unwrap_or(0);
+
+        for i in 0..max_len {
+            for block_i in 0..num_blocks {
+                unsafe {
+                    let mut eq_lane = B::LaneArray::default();
+                    let eq_slice = eq_lane.as_mut();
+                    let base_query_idx = block_i * B::LANES;
+
+                    for lane_idx in 0..B::LANES {
+                        let query_idx = base_query_idx + lane_idx;
+                        if query_idx < t_queries.n_queries {
+                            let text = texts[query_idx];
+                            let enc = if i < text.len() {
+                                get_encoded(text[i]) as usize
+                            } else {
+                                0
+                            };
+                            if enc < crate::constant::IUPAC_MASKS {
+                                eq_slice[lane_idx] =
+                                    B::mask_word_to_scalar(t_queries.peq_masks[enc][query_idx]);
+                            } else {
+                                eq_slice[lane_idx] = B::scalar_from_i64(0);
+                            }
+                        }
+                    }
+                    let eq = B::from_array(eq_lane);
+
+                    let block = &mut *blocks_ptr.add(block_i);
+                    let (vp_out, vn_out, score_out) = Self::myers_step(
+                        block.vp,
+                        block.vn,
+                        block.score,
+                        eq,
+                        last_bit_shift,
+                        last_bit_mask,
+                    );
+                    block.vp = vp_out;
+                    block.vn = vn_out;
+                    block.score = score_out;
+                    let gt_mask = B::simd_gt(score_out, k_simd);
+                    block.failure_mask &= gt_mask;
+                }
+            }
+        }
+
+        if self.alpha_pattern != !0 {
+            self.process_overhangs(t_queries, k_simd, alpha_pattern, num_blocks);
+        }
+
+        self.extract_bools(t_queries)
+    }
+
     #[inline(always)]
     fn process_overhangs(
         &mut self,
@@ -305,6 +379,24 @@ mod tests {
         let text = b"AAAAAGGGG";
         let matches = searcher.scan(&transposed, text, 1);
         println!("matches with alpha 0.5: {:?}", matches);
+    }
+
+    #[test]
+    fn test_multi_text_scan() {
+        let queries = vec![b"GGCC".to_vec(), b"AAAA".to_vec()];
+        // Second matches first text slice, but these are not "paired" and should thus be false
+        let texts: Vec<&[u8]> = vec![b"AAAAAAAAAGG", b"GGGGGGGGG"];
+
+        let transposed = TQueries::<U32>::new(&queries, false);
+        let mut searcher = Searcher::<U32>::new(Some(0.5));
+
+        let matches = searcher.multi_text_scan(&transposed, &texts, 1);
+        println!("matches: {:?}", matches);
+        assert!(matches[0], "First query should match first text");
+        assert!(
+            !matches[1],
+            "Second query should NOT match second text (does first but not paired)"
+        );
     }
 
     fn random_dna_seq(l: usize) -> Vec<u8> {
