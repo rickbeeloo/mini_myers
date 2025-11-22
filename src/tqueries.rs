@@ -120,7 +120,6 @@ impl<B: SimdBackend> TQueries<B> {
             n_simd_blocks,
             peq_masks,
             peqs,
-            // peq_stride was just n_simd_blocks, removed redundancy
             queries: all_queries,
             _marker: PhantomData,
         }

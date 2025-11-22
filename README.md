@@ -24,8 +24,9 @@ This will return boolean results indicating whether each query matches (within `
 use mini_myers::{Searcher, TQueries};
 use mini_myers::backend::{U32, U64};
 
-// Create a searcher with U32 backend (alpha=None means alpha=1.0, no overhang reduction)
+// Create a searcher with U32 backend
 // that is 8 queries in parallel (8*32)
+// "None" is for `alpha`, see next section
 let mut searcher = Searcher::<U32>::new(None);
 let queries = vec![b"ATG".to_vec(), b"TTG".to_vec()];
 let encoded = TQueries::<U32>::new(&queries, false); //true = also search rc
@@ -72,8 +73,7 @@ Search for 96 queries at k=[1,4] in a range of targets (x-axis)
 <img src="test_data/bench.png" alt="mini_scan vs sassy benchmark plot" width="500"/>
 
 
-
-Run the bench using `cargo bench --bench sassy`. 
+Run the same bench using `cargo bench --bench sassy`. 
 
 
 #### Some dev stuff
