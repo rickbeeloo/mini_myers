@@ -45,11 +45,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut rng = StdRng::seed_from_u64(42);
     let mut results = Vec::new();
 
-    let target_lens = vec![32, 64, 100, 1000, 10_000, 100_000, 1_000_000];
+    let target_lens = vec![32, 64, 100, 1000, 10_000, 100_000];
     let query_lens = vec![32];
-    let ks = vec![4];
+    let ks = vec![1, 4];
     let iterations = 100;
-    let n_queries = 100;
+    let n_queries = 96;
 
     // Regular search benchmarks
     for target_len in &target_lens {
