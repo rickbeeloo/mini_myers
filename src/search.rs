@@ -54,12 +54,7 @@ impl<B: SimdBackend> Searcher<B> {
 
     #[inline(always)]
     fn reset_state(&mut self, t_queries: &TQueries<B>, alpha_pattern: u64) {
-        let mask_len = t_queries.query_length;
-        let length_mask = if mask_len >= 64 {
-            !0
-        } else {
-            (1u64 << mask_len) - 1
-        };
+        let length_mask = (!0u64) >> (64usize.saturating_sub(t_queries.query_length));
         let masked_alpha: u64 = alpha_pattern & length_mask;
 
         let initial_score = B::splat_from_usize(masked_alpha.count_ones() as usize);
