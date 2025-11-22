@@ -113,28 +113,38 @@ impl<B: SimdBackend> Searcher<B> {
         let k_simd = B::splat_from_usize(k as usize);
         let last_bit_shift = (t_queries.query_length - 1) as u32;
         let last_bit_mask = B::splat_one() << last_bit_shift;
+        let peqs_ptr: *const <B as SimdBackend>::Simd = t_queries.peqs.as_ptr();
+
+        // Pointers are a bit meh but even unchecked cost quite a bit more
+        let vp_ptr = self.vp.as_mut_ptr();
+        let vn_ptr = self.vn.as_mut_ptr();
+        let score_ptr = self.score.as_mut_ptr();
+        let fail_ptr = self.failure_masks.as_mut_ptr();
+
         for &c in text {
             let encoded = crate::iupac::get_encoded(c) as usize;
+            let peq_offset_base = encoded; // Just the character offset
+
             for block_i in 0..num_blocks {
                 unsafe {
-                    let eq = *t_queries
-                        .peqs
-                        .get_unchecked(block_i * IUPAC_MASKS + encoded);
-                    let vp_in = *self.vp.get_unchecked(block_i);
-                    let vn_in = *self.vn.get_unchecked(block_i);
-                    let score_in = *self.score.get_unchecked(block_i);
+                    let eq = *peqs_ptr.add(block_i * IUPAC_MASKS + peq_offset_base);
+                    let vp_in = *vp_ptr.add(block_i);
+                    let vn_in = *vn_ptr.add(block_i);
+                    let score_in = *score_ptr.add(block_i);
 
                     let (vp_out, vn_out, score_out) =
                         Self::myers_step(vp_in, vn_in, score_in, eq, last_bit_shift, last_bit_mask);
 
-                    *self.vp.get_unchecked_mut(block_i) = vp_out;
-                    *self.vn.get_unchecked_mut(block_i) = vn_out;
-                    *self.score.get_unchecked_mut(block_i) = score_out;
-                    *self.failure_masks.get_unchecked_mut(block_i) &= B::simd_gt(score_out, k_simd);
+                    *vp_ptr.add(block_i) = vp_out;
+                    *vn_ptr.add(block_i) = vn_out;
+                    *score_ptr.add(block_i) = score_out;
+
+                    let gt_mask = B::simd_gt(score_out, k_simd);
+                    let fail_in = *fail_ptr.add(block_i);
+                    *fail_ptr.add(block_i) = fail_in & gt_mask;
                 }
             }
         }
-
         if self.alpha_pattern != !0 {
             self.process_overhangs(t_queries, k_simd, alpha_pattern, num_blocks);
         }
@@ -150,27 +160,34 @@ impl<B: SimdBackend> Searcher<B> {
         alpha: u64,
         num_blocks: usize,
     ) {
-        // We can just directly use the alpha mask as `eq``, as this already reflects alternating "matches" and "mismatches"
+        // We can just directly use the alpha mask as `eq`, as this already reflects alternating "matches" and "mismatches"
         let eq = B::splat_scalar(B::mask_word_to_scalar(alpha));
         let last_bit_shift = (t_queries.query_length - 1) as u32;
         let last_bit_mask = B::splat_one() << last_bit_shift;
         let steps_needed = t_queries.query_length;
 
+        let vp_ptr = self.vp.as_mut_ptr();
+        let vn_ptr = self.vn.as_mut_ptr();
+        let score_ptr = self.score.as_mut_ptr();
+        let fail_ptr = self.failure_masks.as_mut_ptr();
+
         for _ in 0..steps_needed {
             for block_i in 0..num_blocks {
                 unsafe {
-                    let vp_in = *self.vp.get_unchecked(block_i);
-                    let vn_in = *self.vn.get_unchecked(block_i);
-                    let score_in = *self.score.get_unchecked(block_i);
+                    let vp_in = *vp_ptr.add(block_i);
+                    let vn_in = *vn_ptr.add(block_i);
+                    let score_in = *score_ptr.add(block_i);
 
                     let (vp_out, vn_out, score_out) =
                         Self::myers_step(vp_in, vn_in, score_in, eq, last_bit_shift, last_bit_mask);
 
-                    *self.vp.get_unchecked_mut(block_i) = vp_out;
-                    *self.vn.get_unchecked_mut(block_i) = vn_out;
-                    *self.score.get_unchecked_mut(block_i) = score_out;
+                    *vp_ptr.add(block_i) = vp_out;
+                    *vn_ptr.add(block_i) = vn_out;
+                    *score_ptr.add(block_i) = score_out;
 
-                    *self.failure_masks.get_unchecked_mut(block_i) &= B::simd_gt(score_out, k_simd);
+                    let fail_in = *fail_ptr.add(block_i);
+                    let gt_mask = B::simd_gt(score_out, k_simd);
+                    *fail_ptr.add(block_i) = fail_in & gt_mask;
                 }
             }
         }
