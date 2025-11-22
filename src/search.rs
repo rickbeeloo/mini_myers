@@ -108,6 +108,7 @@ impl<B: SimdBackend> Searcher<B> {
     #[inline(always)]
     pub fn scan(&mut self, t_queries: &TQueries<B>, text: &[u8], k: u32) -> &[bool] {
         let num_blocks = t_queries.n_simd_blocks;
+
         let length_mask = (!0u64) >> (64usize.saturating_sub(t_queries.query_length));
         let alpha_pattern = self.alpha_pattern & length_mask;
 
@@ -126,6 +127,7 @@ impl<B: SimdBackend> Searcher<B> {
 
             for block_i in 0..num_blocks {
                 unsafe {
+                    // block_i * IUPAC_MASKS(16) maybe not ideal
                     let eq = *peqs_ptr.add(block_i * IUPAC_MASKS + peq_offset_base);
                     let block = &mut *blocks_ptr.add(block_i);
 

@@ -14,6 +14,8 @@ pub struct TQueries<B: SimdBackend> {
     pub n_simd_blocks: usize,
     pub peq_masks: [Vec<u64>; IUPAC_MASKS],
     pub peqs: Vec<B::Simd>,
+    // Not sure if we should keep it here, but might be handy with
+    // get_query_seq(i) to make sure it aligns with the indices of `scan` result bools
     pub queries: Vec<Vec<u8>>,
     _marker: PhantomData<B>,
 }
@@ -26,12 +28,12 @@ fn build_flat_peqs<B: SimdBackend>(
 ) -> Vec<B::Simd> {
     let mut peqs = Vec::with_capacity(IUPAC_MASKS * n_simd_blocks);
 
-    // Outer loop: iterate over blocks
+    // Iter blocks
     for block_idx in 0..n_simd_blocks {
         let base = block_idx * B::LANES;
         let limit = (nq - base).min(B::LANES);
 
-        // Inner loop: iterate over characters
+        // Iter IUPAC chars
         for mask_vec in peq_masks.iter() {
             let mut lane = B::LaneArray::default();
             let lane_slice = lane.as_mut();
@@ -88,7 +90,7 @@ impl<B: SimdBackend> TQueries<B> {
 
                 temp_block_buffer.fill(0);
 
-                // Inner loop: iterate the queries that belong to this block
+                // iter queries
                 for i in 0..count {
                     let qi = start_q + i;
                     let encoded = get_encoded(all_queries[qi][pos]);
