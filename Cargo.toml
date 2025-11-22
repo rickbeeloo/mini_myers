@@ -16,18 +16,16 @@ name = "mini_myers"
 path = "src/lib.rs"
 
 [[bin]]
-name = "mini_myers"
-path = "src/main.rs"
-
-[[bin]]
-name = "sassy"
-path = "src/bin/sassy.rs"
+name = "scan"
+path = "src/bin/scan.rs"
 
 [dependencies]
 rand = "0.8.5"
 wide = "0.8.1"
 sassy = { git = "https://github.com/RagnarGrootKoerkamp/sassy.git", features = ["expose_trace_code"] }
 pa-types = "1.2.0"
+clap = { version = "4.5", features = ["derive"] }
+needletail = "0.6.3"
 
 
 [dev-dependencies]
@@ -38,6 +36,7 @@ rand = "0.8.5"
 name = "sassy"
 path = "benches/sassy.rs"
 harness = false
+profile = "release"
 
 [profile.release]
 debug = true

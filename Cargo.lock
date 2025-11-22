@@ -381,6 +381,8 @@ checksum = "f52b00d39961fc5b2736ea853c9cc86238e165017a493d1d5c8eac6bdc4cc273"
 name = "mini_myers"
 version = "0.1.3"
 dependencies = [
+ "clap",
+ "needletail",
  "pa-types",
  "rand 0.8.5",
  "sassy",

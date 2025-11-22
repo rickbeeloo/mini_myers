@@ -6,7 +6,7 @@ use wide::{u16x16, u32x8, u64x4, u8x32, CmpEq};
 //todo: simplify this, we could just keep type specific loading (like QueryBlock)
 // and just call wide functions directly?
 
-pub trait SimdBackend: Copy + 'static {
+pub trait SimdBackend: Copy + 'static + Send + Sync + Default {
     type Simd: Copy
         + Add<Output = Self::Simd>
         + Sub<Output = Self::Simd>

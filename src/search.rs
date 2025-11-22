@@ -1,4 +1,5 @@
 use crate::backend::SimdBackend;
+use crate::constant::IUPAC_MASKS;
 use crate::tqueries::TQueries;
 
 pub struct Searcher<B: SimdBackend> {
@@ -100,9 +101,8 @@ impl<B: SimdBackend> Searcher<B> {
         (vp_out, vn_out, score_out)
     }
 
-    #[inline(never)] // to run just search_asm have to use inline(never)
+    #[inline(always)] // to run just search_asm have to use inline(never)
     pub fn scan(&mut self, t_queries: &TQueries<B>, text: &[u8], k: u32) -> &[bool] {
-        let stride = t_queries.n_simd_blocks;
         let num_blocks = t_queries.n_simd_blocks;
         let length_mask = (!0u64) >> (64usize.saturating_sub(t_queries.query_length));
         let alpha_pattern = self.alpha_pattern & length_mask;
@@ -113,28 +113,24 @@ impl<B: SimdBackend> Searcher<B> {
         let k_simd = B::splat_from_usize(k as usize);
         let last_bit_shift = (t_queries.query_length - 1) as u32;
         let last_bit_mask = B::splat_one() << last_bit_shift;
-        // todo: maybe just not unsafe this at all?
-        let peqs_ptr: *const <B as SimdBackend>::Simd = t_queries.peqs.as_ptr();
-        let vp_ptr = self.vp.as_mut_ptr();
-        let vn_ptr = self.vn.as_mut_ptr();
-        let score_ptr = self.score.as_mut_ptr();
-        let fail_ptr = self.failure_masks.as_mut_ptr();
         for &c in text {
             let encoded = crate::iupac::get_encoded(c) as usize;
-            let base_offset = encoded * stride;
             for block_i in 0..num_blocks {
                 unsafe {
-                    let eq = *peqs_ptr.add(base_offset + block_i);
-                    let vp_in = *vp_ptr.add(block_i);
-                    let vn_in = *vn_ptr.add(block_i);
-                    let score_in = *score_ptr.add(block_i);
+                    let eq = *t_queries
+                        .peqs
+                        .get_unchecked(block_i * IUPAC_MASKS + encoded);
+                    let vp_in = *self.vp.get_unchecked(block_i);
+                    let vn_in = *self.vn.get_unchecked(block_i);
+                    let score_in = *self.score.get_unchecked(block_i);
+
                     let (vp_out, vn_out, score_out) =
                         Self::myers_step(vp_in, vn_in, score_in, eq, last_bit_shift, last_bit_mask);
-                    *vp_ptr.add(block_i) = vp_out;
-                    *vn_ptr.add(block_i) = vn_out;
-                    *score_ptr.add(block_i) = score_out;
-                    let gt_mask = B::simd_gt(score_out, k_simd);
-                    *fail_ptr.add(block_i) &= gt_mask;
+
+                    *self.vp.get_unchecked_mut(block_i) = vp_out;
+                    *self.vn.get_unchecked_mut(block_i) = vn_out;
+                    *self.score.get_unchecked_mut(block_i) = score_out;
+                    *self.failure_masks.get_unchecked_mut(block_i) &= B::simd_gt(score_out, k_simd);
                 }
             }
         }
@@ -160,26 +156,21 @@ impl<B: SimdBackend> Searcher<B> {
         let last_bit_mask = B::splat_one() << last_bit_shift;
         let steps_needed = t_queries.query_length;
 
-        let vp_ptr = self.vp.as_mut_ptr();
-        let vn_ptr = self.vn.as_mut_ptr();
-        let score_ptr = self.score.as_mut_ptr();
-        let fail_ptr = self.failure_masks.as_mut_ptr();
-
         for _ in 0..steps_needed {
             for block_i in 0..num_blocks {
                 unsafe {
-                    let vp_in = *vp_ptr.add(block_i);
-                    let vn_in = *vn_ptr.add(block_i);
-                    let score_in = *score_ptr.add(block_i);
+                    let vp_in = *self.vp.get_unchecked(block_i);
+                    let vn_in = *self.vn.get_unchecked(block_i);
+                    let score_in = *self.score.get_unchecked(block_i);
 
                     let (vp_out, vn_out, score_out) =
                         Self::myers_step(vp_in, vn_in, score_in, eq, last_bit_shift, last_bit_mask);
 
-                    *vp_ptr.add(block_i) = vp_out;
-                    *vn_ptr.add(block_i) = vn_out;
-                    *score_ptr.add(block_i) = score_out;
+                    *self.vp.get_unchecked_mut(block_i) = vp_out;
+                    *self.vn.get_unchecked_mut(block_i) = vn_out;
+                    *self.score.get_unchecked_mut(block_i) = score_out;
 
-                    *fail_ptr.add(block_i) &= B::simd_gt(score_out, k_simd);
+                    *self.failure_masks.get_unchecked_mut(block_i) &= B::simd_gt(score_out, k_simd);
                 }
             }
         }
@@ -228,5 +219,260 @@ impl<B: SimdBackend> Searcher<B> {
             }
         }
         mask
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::backend::U32;
+
+    #[test]
+    fn test_simple_match() {
+        let queries = vec![b"GGCC".to_vec(), b"TTAA".to_vec()];
+        let transposed = TQueries::<U32>::new(&queries, false);
+        let mut searcher = Searcher::<U32>::new(None);
+        let text = b"AAAAAAAGGCCAAAAAAAAAAA";
+        let matches = searcher.scan(&transposed, text, 1);
+        assert!(matches[0]);
+        assert!(!matches[1]);
+    }
+
+    #[test]
+    fn test_simple_rc_match() {
+        let queries = vec![b"GGCC".to_vec(), b"TTAA".to_vec()];
+        let transposed = TQueries::<U32>::new(&queries, false);
+        let mut searcher = Searcher::<U32>::new(None);
+        let text = b"TTTTTTTTTTTGGCCTTTTTTT";
+        let matches = searcher.scan(&transposed, text, 1);
+        assert!(matches[0]);
+        assert!(!matches[1]);
+    }
+
+    #[test]
+    fn test_overhang_prefix() {
+        let queries = vec![b"TTTTAA".to_vec()];
+        let transposed = TQueries::<U32>::new(&queries, false);
+
+        let mut searcher = Searcher::<U32>::new(None);
+        let text = b"AAAAAGGGG";
+        let matches = searcher.scan(&transposed, text, 2);
+        assert!(!matches[0]);
+
+        let mut searcher = Searcher::<U32>::new(Some(0.5));
+        let matches = searcher.scan(&transposed, text, 2);
+        assert!(matches[0]);
+    }
+
+    #[test]
+    fn test_overhang_suffix() {
+        let queries = vec![b"GGGGCC".to_vec()];
+        let transposed = TQueries::<U32>::new(&queries, false);
+
+        let mut searcher = Searcher::<U32>::new(None);
+        let text = b"AAAAAGGGG";
+        let matches = searcher.scan(&transposed, text, 1);
+        assert!(!matches[0]);
+
+        let mut searcher = Searcher::<U32>::new(Some(0.5));
+        let matches = searcher.scan(&transposed, text, 1);
+        assert!(matches[0]);
+    }
+
+    #[test]
+    fn test_overhang_both_sides() {
+        let queries = vec![b"GGGGCC".to_vec(), b"TTTTAA".to_vec()];
+        let transposed = TQueries::<U32>::new(&queries, false);
+        let mut searcher = Searcher::<U32>::new(Some(0.5));
+        let text = b"AAAAAGGGG";
+        let matches = searcher.scan(&transposed, text, 1);
+        println!("matches with alpha 0.5: {:?}", matches);
+    }
+
+    fn random_dna_seq(l: usize) -> Vec<u8> {
+        use rand::thread_rng;
+        use rand::Rng;
+        const DNA: &[u8; 4] = b"ACGT";
+        let mut rng = thread_rng();
+        let mut dna = Vec::with_capacity(l);
+        for _ in 0..l {
+            let idx = rng.gen_range(0..4);
+            dna.push(DNA[idx]);
+        }
+        dna
+    }
+
+    #[test]
+    fn test_more_than_single_block_queries() {
+        let n_queries = 32 * 2 + 1;
+        let query_len = 32;
+        let mut queries = Vec::with_capacity(n_queries);
+        for _ in 0..n_queries {
+            queries.push(random_dna_seq(query_len));
+        }
+        let transposed = TQueries::<U32>::new(&queries, false);
+        let mut searcher = Searcher::<U32>::new(None);
+        let text = random_dna_seq(1_000);
+        let matches = searcher.scan(&transposed, &text, 1);
+        assert_eq!(matches.len(), n_queries);
+    }
+
+    #[test]
+    fn test_u64_query() {
+        use crate::backend::U64;
+        let query_len = 64;
+        let queries = vec![random_dna_seq(query_len)];
+        let transposed = TQueries::<U64>::new(&queries, false);
+        let mut searcher = Searcher::<U64>::new(None);
+        let mut text = random_dna_seq(1_000);
+        let matches = searcher.scan(&transposed, &text, 1);
+        assert_eq!(matches.len(), 1);
+        assert!(!matches[0]);
+        // Insert the match at location 100
+        text.splice(100..100 + query_len, queries[0].clone());
+        let matches = searcher.scan(&transposed, &text, 1);
+        assert!(matches[0]);
+    }
+
+    #[test]
+    fn test_u64_overhang() {
+        use crate::backend::U64;
+        let query_len = 64;
+        let queries = vec![random_dna_seq(query_len)];
+        let transposed = TQueries::<U64>::new(&queries, false);
+        let mut searcher = Searcher::<U64>::new(None);
+        let mut text = random_dna_seq(1_000);
+        // get last 32 chars of query, and prefix the text with it
+        let last_32_chars = queries[0]
+            .iter()
+            .rev()
+            .take(32)
+            .rev()
+            .copied()
+            .collect::<Vec<_>>();
+        text.splice(0..0, last_32_chars);
+        let matches = searcher.scan(&transposed, &text, (query_len / 4) as u32);
+        println!("matches: {:?}", matches);
+        assert!(!matches[0]);
+        let mut searcher = Searcher::<U64>::new(Some(0.5));
+        let matches = searcher.scan(&transposed, &text, (query_len / 4) as u32);
+        println!("matches: {:?}", matches);
+        assert!(matches[0]);
+    }
+
+    fn apply_edits(seq: &[u8], k: u32) -> Vec<u8> {
+        use rand::thread_rng;
+        use rand::Rng;
+
+        let mut rng = thread_rng();
+        let mut res = seq.to_vec();
+        const BASES: &[u8] = b"ACGT";
+
+        for _ in 0..k {
+            // 0: Substitution, 1: Insertion, 2: Deletion
+            // If sequence is getting too short, force insertion
+            let op = if res.len() < 2 {
+                1
+            } else {
+                rng.gen_range(0..3)
+            };
+
+            match op {
+                0 => {
+                    // Substitution
+                    let idx = rng.gen_range(0..res.len());
+                    let old_base = res[idx];
+                    let mut new_base = BASES[rng.gen_range(0..4)];
+                    // Ensure we actually change the base
+                    while new_base == old_base {
+                        new_base = BASES[rng.gen_range(0..4)];
+                    }
+                    res[idx] = new_base;
+                }
+                1 => {
+                    // Insertion
+                    let idx = rng.gen_range(0..=res.len()); // Can insert at end
+                    let new_base = BASES[rng.gen_range(0..4)];
+                    res.insert(idx, new_base);
+                }
+                2 => {
+                    // Deletion
+                    let idx = rng.gen_range(0..res.len());
+                    res.remove(idx);
+                }
+                _ => unreachable!(),
+            }
+        }
+        res
+    }
+
+    #[test]
+    fn test_fuzz_search_correctness() {
+        use crate::backend::U32;
+        use rand::thread_rng;
+        use rand::Rng;
+
+        let mut rng = thread_rng();
+        let num_iterations = 1_000;
+        let mut len_skipped = 0;
+
+        for i in 0..num_iterations {
+            let text_len = rng.gen_range(500..1500);
+            let query_len = rng.gen_range(20..32);
+            let k = rng.gen_range(1..=3);
+            let mut text = random_dna_seq(text_len);
+
+            let query_original = random_dna_seq(query_len);
+
+            // Mutate it with at most k edits
+            let mutated_query = apply_edits(&query_original, k);
+
+            // With U32 backend we can only search for up to 32nts
+            if mutated_query.len() > 32 {
+                len_skipped += 1;
+            }
+
+            let insert_idx =
+                rng.gen_range(0..text.len().saturating_sub(mutated_query.len()).max(1));
+            text.splice(
+                insert_idx..insert_idx + mutated_query.len(),
+                mutated_query.clone(),
+            );
+
+            let queries = vec![query_original.clone()];
+            let transposed = TQueries::<U32>::new(&queries, false);
+            let mut searcher = Searcher::<U32>::new(None);
+
+            let matches = searcher.scan(&transposed, &text, k);
+
+            if !matches[0] {
+                panic!(
+                    "Fuzz test failed at iteration {}.\n\
+                     Query (Original): {:?}\n\
+                     Query (Mutated):  {:?}\n\
+                     Text Snippet:     {:?}\n\
+                     K: {}\n\
+                     Inserted At: {}",
+                    i,
+                    std::str::from_utf8(&query_original).unwrap(),
+                    std::str::from_utf8(&mutated_query).unwrap(),
+                    std::str::from_utf8(
+                        &text[insert_idx..(insert_idx + mutated_query.len() + 5).min(text.len())]
+                    )
+                    .unwrap(),
+                    k,
+                    insert_idx
+                );
+            }
+        }
+        println!("Passed {} fuzz iterations.", num_iterations);
+        println!(
+            "Skipped {} queries because they were too long.",
+            len_skipped
+        );
+        // Lets error if we skipped more than half
+        if len_skipped > num_iterations / 2 {
+            panic!("Skipped more than half of the queries, that seems odd");
+        }
     }
 }

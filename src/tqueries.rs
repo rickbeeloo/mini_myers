@@ -22,15 +22,20 @@ pub struct TQueries<B: SimdBackend> {
 fn build_flat_peqs<B: SimdBackend>(
     peq_masks: &[Vec<u64>; IUPAC_MASKS],
     nq: usize,
-    stride: usize,
+    n_simd_blocks: usize,
 ) -> Vec<B::Simd> {
-    let mut peqs = Vec::with_capacity(IUPAC_MASKS * stride);
-    for mask_vec in peq_masks {
-        for v in 0..stride {
-            let base = v * B::LANES;
+    let mut peqs = Vec::with_capacity(IUPAC_MASKS * n_simd_blocks);
+
+    // Outer loop: iterate over blocks
+    for block_idx in 0..n_simd_blocks {
+        let base = block_idx * B::LANES;
+        let limit = (nq - base).min(B::LANES);
+
+        // Inner loop: iterate over characters
+        for mask_vec in peq_masks.iter() {
             let mut lane = B::LaneArray::default();
             let lane_slice = lane.as_mut();
-            let limit = (nq - base).min(B::LANES);
+
             for lane_idx in 0..limit {
                 lane_slice[lane_idx] = B::mask_word_to_scalar(mask_vec[base + lane_idx]);
             }
@@ -39,7 +44,6 @@ fn build_flat_peqs<B: SimdBackend>(
     }
     peqs
 }
-
 impl<B: SimdBackend> TQueries<B> {
     pub fn new(queries: &[Vec<u8>], include_rc: bool) -> Self {
         assert!(!queries.is_empty(), "No queries provided");
