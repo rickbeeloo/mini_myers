@@ -45,8 +45,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut rng = StdRng::seed_from_u64(42);
     let mut results = Vec::new();
 
-    let target_lens = vec![32, 64, 100, 1000, 10_000, 100_000];
-    let query_lens = vec![16];
+    let target_lens = vec![32, 64, 100, 1000, 10_000, 100_000, 1_000_000];
+    let query_lens = vec![32];
     let ks = vec![4];
     let iterations = 100;
     let n_queries = 100;
@@ -110,8 +110,8 @@ fn run_bench_round(
     let mut searcher = Searcher::<Iupac>::new_rc();
 
     // Create TQueries from the queries
-    let t_queries = TQueries::<U16>::new(&queries, true);
-    let mut mini_searcher = mini_searcher::<U16>::new(None);
+    let t_queries = TQueries::<U32>::new(&queries, true);
+    let mut mini_searcher = mini_searcher::<U32>::new(None);
 
     // Count matches for sassy (run once before timing)
     let mut sassy_match_count = 0;

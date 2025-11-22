@@ -1,5 +1,5 @@
 use std::convert::TryInto;
-use std::ops::{Add, BitAnd, BitOr, BitOrAssign, BitXor, Shl, Shr, Sub};
+use std::ops::{Add, BitAnd, BitAndAssign, BitOr, BitOrAssign, BitXor, Shl, Shr, Sub};
 
 use wide::{u16x16, u32x8, u64x4, u8x32, CmpEq};
 
@@ -12,6 +12,7 @@ pub trait SimdBackend: Copy + 'static {
         + Sub<Output = Self::Simd>
         + BitAnd<Output = Self::Simd>
         + BitOr<Output = Self::Simd>
+        + BitAndAssign<Self::Simd>
         + BitOrAssign<Self::Simd>
         + BitXor<Output = Self::Simd>
         // + Shl<Self::Simd, Output = Self::Simd>
