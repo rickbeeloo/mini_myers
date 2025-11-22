@@ -232,6 +232,7 @@ impl<B: SimdBackend> Searcher<B> {
     }
 
     #[inline(always)]
+    // Like in sassy
     fn generate_alpha_mask(alpha: f32, length: usize) -> u64 {
         let mut mask = 0u64;
         let limit = length.min(64);
@@ -391,8 +392,7 @@ mod tests {
         const BASES: &[u8] = b"ACGT";
 
         for _ in 0..k {
-            // 0: Substitution, 1: Insertion, 2: Deletion
-            // If sequence is getting too short, force insertion
+            // To not go less than 2 bases
             let op = if res.len() < 2 {
                 1
             } else {
@@ -413,7 +413,7 @@ mod tests {
                 }
                 1 => {
                     // Insertion
-                    let idx = rng.gen_range(0..=res.len()); // Can insert at end
+                    let idx = rng.gen_range(0..=res.len());
                     let new_base = BASES[rng.gen_range(0..4)];
                     res.insert(idx, new_base);
                 }

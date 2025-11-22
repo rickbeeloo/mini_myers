@@ -3,11 +3,12 @@ use mini_myers::backend::{U16, U32, U64};
 use mini_myers::search::Searcher;
 use mini_myers::tqueries::TQueries;
 use needletail::parse_fastx_file;
-use std::fs::{self, File};
+use std::fs::File;
+use std::io::BufWriter;
 use std::io::Write;
-use std::io::{BufRead, BufReader, BufWriter};
 use std::path::PathBuf;
 
+// Ugly but fine for testing :)
 enum AnySearcher {
     U16(Searcher<U16>),
     U32(Searcher<U32>),
@@ -61,29 +62,6 @@ struct Args {
     /// if provided, will write the results to a file
     #[arg(short, long)]
     output: Option<PathBuf>,
-}
-
-fn read_fasta(path: &PathBuf) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-    let file = fs::File::open(path)?;
-    let reader = BufReader::new(file);
-    let mut sequence = Vec::new();
-
-    for line in reader.lines() {
-        let line = line?;
-        let line = line.trim();
-        // Skip header lines (starting with >)
-        if line.starts_with('>') {
-            continue;
-        }
-        // Skip empty lines
-        if line.is_empty() {
-            continue;
-        }
-        // Add sequence bytes
-        sequence.extend_from_slice(line.as_bytes());
-    }
-
-    Ok(sequence)
 }
 
 fn read_fasta_queries(path: &PathBuf) -> (Vec<Vec<u8>>, Vec<String>) {
@@ -148,6 +126,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .map(|(i, _)| i)
             .collect::<Vec<_>>();
 
+        // We just write "if" a match is found
         for index in true_indices {
             writeln!(buf_writer, "{}\t{}", target_id, headers[index])?;
         }
