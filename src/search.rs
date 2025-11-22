@@ -57,7 +57,7 @@ impl<B: SimdBackend> Searcher<B> {
         let length_mask = (!0u64) >> (64usize.saturating_sub(t_queries.query_length));
         let masked_alpha: u64 = alpha_pattern & length_mask;
 
-        let initial_score = B::splat_from_usize(masked_alpha.count_ones() as usize);
+        let initial_score = B::splat_scalar(B::scalar_from_i64(masked_alpha.count_ones() as i64));
         let alpha_simd = B::splat_scalar(B::mask_word_to_scalar(alpha_pattern));
         let zero = B::splat_zero();
         let all_ones = B::splat_all_ones();
@@ -114,7 +114,7 @@ impl<B: SimdBackend> Searcher<B> {
         self.ensure_capacity(num_blocks, t_queries.n_queries);
         self.reset_state(t_queries, alpha_pattern);
 
-        let k_simd = B::splat_from_usize(k as usize);
+        let k_simd = B::splat_scalar(B::scalar_from_i64(k as i64));
         let last_bit_shift = (t_queries.query_length - 1) as u32;
         let last_bit_mask = B::splat_one() << last_bit_shift;
         let peqs_ptr: *const <B as SimdBackend>::Simd = t_queries.peqs.as_ptr();
@@ -242,8 +242,9 @@ impl<B: SimdBackend> Searcher<B> {
 }
 
 mod tests {
-    
-    
+    use super::Searcher;
+    use crate::backend::{U32, U64};
+    use crate::tqueries::TQueries;
 
     #[test]
     fn test_simple_match() {

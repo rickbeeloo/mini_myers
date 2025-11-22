@@ -3,9 +3,6 @@ use std::ops::{Add, BitAnd, BitAndAssign, BitOr, BitOrAssign, BitXor, Shl, Shr, 
 
 use wide::{u16x16, u32x8, u64x4, u8x32, CmpEq};
 
-//todo: simplify this, we could just keep type specific loading (like QueryBlock)
-// and just call wide functions directly?
-
 pub trait SimdBackend: Copy + 'static + Send + Sync + Default {
     type Simd: Copy
         + Add<Output = Self::Simd>
@@ -15,8 +12,6 @@ pub trait SimdBackend: Copy + 'static + Send + Sync + Default {
         + BitAndAssign<Self::Simd>
         + BitOrAssign<Self::Simd>
         + BitXor<Output = Self::Simd>
-        // + Shl<Self::Simd, Output = Self::Simd>
-        //   + Shr<Self::Simd, Output = Self::Simd>
         + Shl<i32, Output = Self::Simd>
         + Shr<i32, Output = Self::Simd>
         + Shl<u32, Output = Self::Simd>
@@ -29,32 +24,30 @@ pub trait SimdBackend: Copy + 'static + Send + Sync + Default {
 
     const LANES: usize;
     const LIMB_BITS: usize;
-    const CARRY_SHIFT: u32;
-    const MAX_POSITIVE: Self::Scalar;
 
+    /// Convert a u64 mask word to the backend's scalar type
+    fn mask_word_to_scalar(word: u64) -> Self::Scalar;
+
+    /// Convert i64 to the backend's scalar type
+    fn scalar_from_i64(value: i64) -> Self::Scalar;
+
+    /// Convert array to SIMD vector
+    fn from_array(arr: Self::LaneArray) -> Self::Simd;
+
+    /// Convert SIMD vector to array
+    fn to_array(vec: Self::Simd) -> Self::LaneArray;
+
+    /// Unsigned greater-than comparison (requires special handling)
+    fn simd_gt(lhs: Self::Simd, rhs: Self::Simd) -> Self::Simd;
+
+    /// Convert byte slice to query block type
+    fn to_query_block(slice: &[u8]) -> Self::QueryBlock;
+
+    // Minimal splat helpers - these are thin wrappers but necessary since we can't call splat generically
     fn splat_all_ones() -> Self::Simd;
     fn splat_zero() -> Self::Simd;
     fn splat_one() -> Self::Simd;
     fn splat_scalar(value: Self::Scalar) -> Self::Simd;
-    fn scalar_from_i64(value: i64) -> Self::Scalar;
-    fn scalar_from_usize(value: usize) -> Self::Scalar {
-        Self::scalar_from_i64(value as i64)
-    }
-    fn scalar_to_i64(value: Self::Scalar) -> i64;
-    fn splat_from_i64(value: i64) -> Self::Simd {
-        Self::splat_scalar(Self::scalar_from_i64(value))
-    }
-    fn splat_from_usize(value: usize) -> Self::Simd {
-        Self::splat_scalar(Self::scalar_from_usize(value))
-    }
-    fn mask_word_to_scalar(word: u64) -> Self::Scalar;
-    fn scalar_to_f32(value: Self::Scalar) -> f32;
-    fn to_array(vec: Self::Simd) -> Self::LaneArray;
-    fn from_array(arr: Self::LaneArray) -> Self::Simd;
-    fn min(lhs: Self::Simd, rhs: Self::Simd) -> Self::Simd;
-    fn blend(mask: Self::Simd, t: Self::Simd, f: Self::Simd) -> Self::Simd;
-    fn simd_gt(lhs: Self::Simd, rhs: Self::Simd) -> Self::Simd;
-    fn to_query_block(slice: &[u8]) -> Self::QueryBlock;
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -68,8 +61,31 @@ impl SimdBackend for I32x8Backend {
 
     const LANES: usize = 8;
     const LIMB_BITS: usize = 32;
-    const CARRY_SHIFT: u32 = 32;
-    const MAX_POSITIVE: Self::Scalar = u32::MAX;
+
+    #[inline(always)]
+    fn mask_word_to_scalar(word: u64) -> Self::Scalar {
+        word as u32
+    }
+
+    #[inline(always)]
+    fn scalar_from_i64(value: i64) -> Self::Scalar {
+        value.try_into().expect("value does not fit in u32")
+    }
+
+    #[inline(always)]
+    fn from_array(arr: Self::LaneArray) -> Self::Simd {
+        u32x8::new(arr)
+    }
+
+    #[inline(always)]
+    fn to_array(vec: Self::Simd) -> Self::LaneArray {
+        vec.to_array()
+    }
+
+    #[inline(always)]
+    fn to_query_block(slice: &[u8]) -> Self::QueryBlock {
+        u8x32::new(slice.try_into().expect("Slice must be 32 bytes"))
+    }
 
     #[inline(always)]
     fn splat_all_ones() -> Self::Simd {
@@ -89,51 +105,6 @@ impl SimdBackend for I32x8Backend {
     #[inline(always)]
     fn splat_scalar(value: Self::Scalar) -> Self::Simd {
         u32x8::splat(value)
-    }
-
-    #[inline(always)]
-    fn scalar_from_i64(value: i64) -> Self::Scalar {
-        value.try_into().expect("value does not fit in u32")
-    }
-
-    #[inline(always)]
-    fn scalar_to_i64(value: Self::Scalar) -> i64 {
-        value as i64
-    }
-
-    #[inline(always)]
-    fn mask_word_to_scalar(word: u64) -> Self::Scalar {
-        word as u32
-    }
-
-    #[inline(always)]
-    fn scalar_to_f32(value: Self::Scalar) -> f32 {
-        value as f32
-    }
-
-    #[inline(always)]
-    fn to_array(vec: Self::Simd) -> Self::LaneArray {
-        vec.to_array()
-    }
-
-    #[inline(always)]
-    fn from_array(arr: Self::LaneArray) -> Self::Simd {
-        u32x8::new(arr)
-    }
-
-    #[inline(always)]
-    fn min(lhs: Self::Simd, rhs: Self::Simd) -> Self::Simd {
-        lhs.min(rhs)
-    }
-
-    #[inline(always)]
-    fn blend(mask: Self::Simd, t: Self::Simd, f: Self::Simd) -> Self::Simd {
-        mask.blend(t, f)
-    }
-
-    #[inline(always)]
-    fn to_query_block(slice: &[u8]) -> Self::QueryBlock {
-        u8x32::new(slice.try_into().expect("Slice must be 32 bytes"))
     }
 
     // Thanks Ragnar
@@ -163,8 +134,31 @@ impl SimdBackend for I64x4Backend {
 
     const LANES: usize = 4;
     const LIMB_BITS: usize = 64;
-    const CARRY_SHIFT: u32 = 64;
-    const MAX_POSITIVE: Self::Scalar = u64::MAX;
+
+    #[inline(always)]
+    fn mask_word_to_scalar(word: u64) -> Self::Scalar {
+        word
+    }
+
+    #[inline(always)]
+    fn scalar_from_i64(value: i64) -> Self::Scalar {
+        value as u64
+    }
+
+    #[inline(always)]
+    fn from_array(arr: Self::LaneArray) -> Self::Simd {
+        u64x4::new(arr)
+    }
+
+    #[inline(always)]
+    fn to_array(vec: Self::Simd) -> Self::LaneArray {
+        vec.to_array()
+    }
+
+    #[inline(always)]
+    fn to_query_block(slice: &[u8]) -> Self::QueryBlock {
+        slice.try_into().expect("Slice must be 64 bytes")
+    }
 
     #[inline(always)]
     fn splat_all_ones() -> Self::Simd {
@@ -184,51 +178,6 @@ impl SimdBackend for I64x4Backend {
     #[inline(always)]
     fn splat_scalar(value: Self::Scalar) -> Self::Simd {
         u64x4::splat(value)
-    }
-
-    #[inline(always)]
-    fn scalar_from_i64(value: i64) -> Self::Scalar {
-        value as u64
-    }
-
-    #[inline(always)]
-    fn scalar_to_i64(value: Self::Scalar) -> i64 {
-        value as i64
-    }
-
-    #[inline(always)]
-    fn mask_word_to_scalar(word: u64) -> Self::Scalar {
-        word
-    }
-
-    #[inline(always)]
-    fn scalar_to_f32(value: Self::Scalar) -> f32 {
-        value as f64 as f32
-    }
-
-    #[inline(always)]
-    fn to_array(vec: Self::Simd) -> Self::LaneArray {
-        vec.to_array()
-    }
-
-    #[inline(always)]
-    fn from_array(arr: Self::LaneArray) -> Self::Simd {
-        u64x4::new(arr)
-    }
-
-    #[inline(always)]
-    fn min(lhs: Self::Simd, rhs: Self::Simd) -> Self::Simd {
-        lhs.min(rhs)
-    }
-
-    #[inline(always)]
-    fn blend(mask: Self::Simd, t: Self::Simd, f: Self::Simd) -> Self::Simd {
-        mask.blend(t, f)
-    }
-
-    #[inline(always)]
-    fn to_query_block(slice: &[u8]) -> Self::QueryBlock {
-        slice.try_into().expect("Slice must be 64 bytes")
     }
 
     // Thanks Ragnar
@@ -257,8 +206,31 @@ impl SimdBackend for I16x16Backend {
 
     const LANES: usize = 16;
     const LIMB_BITS: usize = 16;
-    const CARRY_SHIFT: u32 = 16;
-    const MAX_POSITIVE: Self::Scalar = u16::MAX;
+
+    #[inline(always)]
+    fn mask_word_to_scalar(word: u64) -> Self::Scalar {
+        word as u16
+    }
+
+    #[inline(always)]
+    fn scalar_from_i64(value: i64) -> Self::Scalar {
+        value.try_into().expect("value does not fit in u16")
+    }
+
+    #[inline(always)]
+    fn from_array(arr: Self::LaneArray) -> Self::Simd {
+        u16x16::new(arr)
+    }
+
+    #[inline(always)]
+    fn to_array(vec: Self::Simd) -> Self::LaneArray {
+        vec.to_array()
+    }
+
+    #[inline(always)]
+    fn to_query_block(slice: &[u8]) -> Self::QueryBlock {
+        slice.try_into().expect("Slice must be 16 bytes")
+    }
 
     #[inline(always)]
     fn splat_all_ones() -> Self::Simd {
@@ -278,51 +250,6 @@ impl SimdBackend for I16x16Backend {
     #[inline(always)]
     fn splat_scalar(value: Self::Scalar) -> Self::Simd {
         u16x16::splat(value)
-    }
-
-    #[inline(always)]
-    fn scalar_from_i64(value: i64) -> Self::Scalar {
-        value.try_into().expect("value does not fit in u16")
-    }
-
-    #[inline(always)]
-    fn scalar_to_i64(value: Self::Scalar) -> i64 {
-        value as i64
-    }
-
-    #[inline(always)]
-    fn mask_word_to_scalar(word: u64) -> Self::Scalar {
-        word as u16
-    }
-
-    #[inline(always)]
-    fn scalar_to_f32(value: Self::Scalar) -> f32 {
-        value as f32
-    }
-
-    #[inline(always)]
-    fn to_array(vec: Self::Simd) -> Self::LaneArray {
-        vec.to_array()
-    }
-
-    #[inline(always)]
-    fn from_array(arr: Self::LaneArray) -> Self::Simd {
-        u16x16::new(arr)
-    }
-
-    #[inline(always)]
-    fn min(lhs: Self::Simd, rhs: Self::Simd) -> Self::Simd {
-        lhs.min(rhs)
-    }
-
-    #[inline(always)]
-    fn blend(mask: Self::Simd, t: Self::Simd, f: Self::Simd) -> Self::Simd {
-        mask.blend(t, f)
-    }
-
-    #[inline(always)]
-    fn to_query_block(slice: &[u8]) -> Self::QueryBlock {
-        slice.try_into().expect("Slice must be 16 bytes")
     }
 
     #[inline(always)]
