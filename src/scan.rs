@@ -74,7 +74,7 @@ impl<B: SimdBackend> Searcher<B> {
         }
     }
 
-    #[inline(always)]
+    //#[inline(always)]
     fn myers_step(
         vp: B::Simd,
         vn: B::Simd,
@@ -118,19 +118,20 @@ impl<B: SimdBackend> Searcher<B> {
         let k_simd = B::splat_scalar(B::scalar_from_i64(k as i64));
         let last_bit_shift = (t_queries.query_length - 1) as u32;
         let last_bit_mask = B::splat_one() << last_bit_shift;
+
         let peqs_ptr: *const <B as SimdBackend>::Simd = t_queries.peqs.as_ptr();
         let blocks_ptr = self.blocks.as_mut_ptr();
 
         for &c in text {
+            // Still quite some cache misses we move around a lot to get the peq vectors
             let encoded = crate::iupac::get_encoded(c) as usize;
             let peq_offset_base = encoded;
+            let peq_block_start_index = peq_offset_base * num_blocks;
 
             for block_i in 0..num_blocks {
                 unsafe {
-                    // block_i * IUPAC_MASKS(16) maybe not ideal
-                    let eq = *peqs_ptr.add(block_i * IUPAC_MASKS + peq_offset_base);
+                    let eq = *peqs_ptr.add(peq_block_start_index + block_i);
                     let block = &mut *blocks_ptr.add(block_i);
-
                     let (vp_out, vn_out, score_out) = Self::myers_step(
                         block.vp,
                         block.vn,
@@ -139,11 +140,9 @@ impl<B: SimdBackend> Searcher<B> {
                         last_bit_shift,
                         last_bit_mask,
                     );
-
                     block.vp = vp_out;
                     block.vn = vn_out;
                     block.score = score_out;
-
                     let gt_mask = B::simd_gt(score_out, k_simd);
                     block.failure_mask &= gt_mask;
                 }

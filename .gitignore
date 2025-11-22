@@ -6,3 +6,4 @@ perf*
 *.asm
 *.s
 *old*
+*heaptrack*
