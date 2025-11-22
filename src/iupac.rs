@@ -6,7 +6,6 @@ pub fn get_encoded(c: u8) -> u8 {
 }
 
 // Based on sassy: https://github.com/RagnarGrootKoerkamp/sassy/blob/master/src/profiles/iupac.rs#L258
-// todo: add some tests for this table
 #[rustfmt::skip]
 const IUPAC_CODE: [u8; 32] = {
     // Every char *not* being in the table will be set to invalid IUPAC (255 u8 value)

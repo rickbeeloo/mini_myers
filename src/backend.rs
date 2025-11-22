@@ -3,6 +3,8 @@ use std::ops::{Add, BitAnd, BitAndAssign, BitOr, BitOrAssign, BitXor, Shl, Shr, 
 
 use wide::{u16x16, u32x8, u64x4, u8x32, CmpEq};
 
+// So much boilerplate still, cant we generalize over the wide type or something
+
 pub trait SimdBackend: Copy + 'static + Send + Sync + Default {
     type Simd: Copy
         + Add<Output = Self::Simd>
