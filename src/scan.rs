@@ -1,5 +1,5 @@
 use crate::backend::SimdBackend;
-use crate::constant::IUPAC_MASKS;
+use crate::iupac::get_encoded;
 use crate::tqueries::TQueries;
 
 #[derive(Clone, Copy)]
@@ -123,10 +123,8 @@ impl<B: SimdBackend> Searcher<B> {
         let blocks_ptr = self.blocks.as_mut_ptr();
 
         for &c in text {
-            // Still quite some cache misses we move around a lot to get the peq vectors
-            let encoded = crate::iupac::get_encoded(c) as usize;
-            let peq_offset_base = encoded;
-            let peq_block_start_index = peq_offset_base * num_blocks;
+            let encoded = get_encoded(c) as usize;
+            let peq_block_start_index = encoded * num_blocks;
 
             for block_i in 0..num_blocks {
                 unsafe {
