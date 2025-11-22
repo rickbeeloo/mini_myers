@@ -242,8 +242,8 @@ impl<B: SimdBackend> Searcher<B> {
 }
 
 mod tests {
-    use super::*;
-    use crate::backend::U32;
+    
+    
 
     #[test]
     fn test_simple_match() {
