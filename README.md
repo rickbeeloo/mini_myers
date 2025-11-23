@@ -95,9 +95,10 @@ assert_eq!(matches, vec![true, false, true]);
 ---
 
 #### Little bench
-Note that `mini_myers` and `sassy` are not directly comparable. 
-The `mini_myers` "scan" mode just returns whether a match is present `<=k`, whereas sassy 
-finds the positions and performs traceback (of course much more compute).
+Note that `mini_myers` and `sassy` are not directly comparable.
+- `sassy`: also preforms a traceback 
+- `mini scan`: only returns presence
+- `mini search`: returns end position (but not traceback)
 
 Search for 96 queries at k=[1,4] in a range of targets (x-axis)
 
