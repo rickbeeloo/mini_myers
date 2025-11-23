@@ -445,7 +445,7 @@ impl<B: SimdBackend> Searcher<B> {
 mod tests {
 
     use super::Searcher;
-    use crate::backend::{U32, U64};
+    use crate::backend::U32;
     use crate::tqueries::TQueries;
 
     #[test]

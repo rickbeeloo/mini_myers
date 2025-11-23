@@ -113,7 +113,7 @@ impl SimdBackend for I32x8Backend {
 
     #[inline(always)]
     fn scalar_to_u32(value: Self::Scalar) -> u32 {
-        value as u32
+        value
     }
 
     // Thanks Ragnar
@@ -131,7 +131,6 @@ impl SimdBackend for I32x8Backend {
     }
 }
 
-/// Backend using 64-bit limbs with four SIMD lanes, useful for very long queries.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct I64x4Backend;
 
