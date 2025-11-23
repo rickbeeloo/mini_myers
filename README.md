@@ -20,45 +20,76 @@ Most likely you are looking for [sassy](https://github.com/RagnarGrootKoerkamp/s
 This will return boolean results indicating whether each query matches (within `k` edits). 
 
 
+### Presence of queries in texts
+
 ```rust
 use mini_myers::{Searcher, TQueries};
 use mini_myers::backend::{U32, U64};
 
-// Create a searcher with U32 backend
-// that is 8 queries in parallel (8*32)
-// "None" is for `alpha`, see next section
-let mut searcher = Searcher::<U32>::new(None);
+let mut scanner = Searcher::<U32>::new(None);
 let queries = vec![b"ATG".to_vec(), b"TTG".to_vec()];
-let encoded = TQueries::<U32>::new(&queries, false); //true = also search rc
+let encoded = TQueries::<U32>::new(&queries, false); //false = only fwd, true = fwd + rc
 let target = b"CCCTCGCCCCCCATGCCCCC";
-
-// Scan mode: get boolean results indicating if each query matches (within k edits)
-let results = searcher.scan(&encoded, target, 4);
+let results = scanner.scan(&encoded, target, 0);
+// results = [true, false]
 assert!(results[0]); // "ATG" matches
 assert!(!results[1]); // "TTG" doesn't match
-
-// Use U64 backend for longer queries (up to 64 nucleotides)
-// that is 4 queries in parallel (4*64)
-let mut searcher64 = Searcher::<U64>::new(None);
-let encoded = TQueries::<U64>::new(&queries, false);
-let results = searcher64.scan(&encoded, target, 4);
 ```
 
+### End locations of queries in texts
 
-#### With "overhang" enabled
-Like in [sassy](https://github.com/RagnarGrootKoerkamp/sassy/) `mini_myers` can apply 
-a reduced penalty for characters "hanging over" the target sequence, i.e.:
-```
-    q: AAACCC
-          |||
-    t:    CCCGGGGGGGGGGGGGG
-```
-You can enable overhang by passing `Some(overhang_cost)` to `Searcher::new()`, i.e. `Some(0.5)`:
 ```rust
-let mut searcher = Searcher::<U32>::new(Some(0.5));
-let results = searcher.scan(&encoded, target, 4);
+use mini_myers::{Searcher, TQueries};
+use mini_myers::backend::{U32, U64};
+
+let mut searcher = Searcher::<U32>::new(None);
+let queries = vec![b"ATG".to_vec(), b"TTG".to_vec()];
+let encoded = TQueries::<U32>::new(&queries, false); 
+let target = b"CCCTCGCCCCCCATGCCCCC";
+let results = searcher.search(&encoded, target, 0);
+// results = [[14], []]
 ```
-In the example above, this would give a cost of `3 * 0.5 = 1.5`
+
+### Presence or locations with overhang
+We use the `alpha` parameter to reduce the penalty for "overhanging" query sequence
+at either end of the text: `overhang_length * alpha`:
+```
+    q: AAAACCC
+           |||
+    t:     CCCGGGGGGGGGGGGGG
+       ^^^^ overhang (AAAA)
+```
+```rust
+use mini_myers::{Searcher, TQueries};
+use mini_myers::backend::{U32, U64};
+use mini_myers::{Searcher, TQueries};
+let mut searcher = Searcher::<U32>::new(Some(0.5));
+let queries = vec![b"AAAACCC".to_vec()];
+let encoded = TQueries::<U32>::new(&queries, false);
+let target = b"CCCGGGGGGGGGGGGGG";
+// 4 * 0.5(alpha) = 2
+let results = searcher.search(&encoded, target, 2);
+// results = [[0,1]]
+```
+
+### Multi-text scan (presence)
+If you first run a search using a prefix, then want to compare the
+entire sequence you can use `multi_text_scan` to compare a list 
+of queries to a list of texts, where queries[0] is compared to texts[0], 
+and so on:
+
+```rust
+let queries = vec![b"GGCC".to_vec(), b"AAAA".to_vec(), b"CCGG".to_vec()];
+let texts: Vec<&[u8]> = vec![b"AAAAAAAAAAAAAAAAAAAAAAAAAAGG", 
+                             b"GGGGGGGG", 
+                             b"AAAAAAAAAACC"];
+
+let transposed = TQueries::<U32>::new(&queries, false);
+let mut searcher = Searcher::<U32>::new(Some(0.5));
+let matches = searcher.multi_text_scan(&transposed, &texts, 1);
+assert_eq!(matches, vec![true, false, true]);
+
+```
 
 
 ---
