@@ -5,7 +5,7 @@ use wide::{u16x16, u32x8, u64x4, u8x32, CmpEq};
 
 // So much boilerplate still, cant we generalize over the wide type or something
 
-pub trait SimdBackend: Copy + 'static + Send + Sync + Default {
+pub trait SimdBackend: Copy + 'static + Send + Sync + Default + std::fmt::Debug {
     type Simd: Copy
         + Add<Output = Self::Simd>
         + Sub<Output = Self::Simd>
@@ -18,9 +18,10 @@ pub trait SimdBackend: Copy + 'static + Send + Sync + Default {
         + Shr<i32, Output = Self::Simd>
         + Shl<u32, Output = Self::Simd>
         + Shr<u32, Output = Self::Simd>
-        + CmpEq<Output = Self::Simd>;
+        + CmpEq<Output = Self::Simd>
+        + PartialEq;
 
-    type Scalar: Copy + PartialEq;
+    type Scalar: Copy + PartialEq + std::fmt::Debug;
     type LaneArray: AsRef<[Self::Scalar]> + AsMut<[Self::Scalar]> + Copy + Default;
     type QueryBlock: Copy + std::fmt::Debug;
 
@@ -44,6 +45,7 @@ pub trait SimdBackend: Copy + 'static + Send + Sync + Default {
 
     /// Convert byte slice to query block type
     fn to_query_block(slice: &[u8]) -> Self::QueryBlock;
+    fn scalar_to_u32(value: Self::Scalar) -> u32;
 
     // Minimal splat helpers - these are thin wrappers but necessary since we can't call splat generically
     fn splat_all_ones() -> Self::Simd;
@@ -107,6 +109,11 @@ impl SimdBackend for I32x8Backend {
     #[inline(always)]
     fn splat_scalar(value: Self::Scalar) -> Self::Simd {
         u32x8::splat(value)
+    }
+
+    #[inline(always)]
+    fn scalar_to_u32(value: Self::Scalar) -> u32 {
+        value as u32
     }
 
     // Thanks Ragnar
@@ -182,6 +189,11 @@ impl SimdBackend for I64x4Backend {
         u64x4::splat(value)
     }
 
+    #[inline(always)]
+    fn scalar_to_u32(value: Self::Scalar) -> u32 {
+        value as u32
+    }
+
     // Thanks Ragnar
     // https://github.com/RagnarGrootKoerkamp/sassy/blob/0772487a8f08c37f5742aa6217f4744312b38a8e/src/profiles.rs#L50-L67
     #[inline(always)]
@@ -252,6 +264,11 @@ impl SimdBackend for I16x16Backend {
     #[inline(always)]
     fn splat_scalar(value: Self::Scalar) -> Self::Simd {
         u16x16::splat(value)
+    }
+
+    #[inline(always)]
+    fn scalar_to_u32(value: Self::Scalar) -> u32 {
+        value as u32
     }
 
     #[inline(always)]

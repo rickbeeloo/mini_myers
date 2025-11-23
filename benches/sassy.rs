@@ -121,8 +121,8 @@ fn run_bench_round(
     }
 
     // Count matches for mini_search (run once before timing)
-    let mini_search_result_sample = mini_searcher.scan(&t_queries, &target, k as u32);
-    let mini_search_match_count = mini_search_result_sample.iter().filter(|&&x| x).count();
+    let mini_search_result_sample = mini_searcher.search(&t_queries, &target, k as u32);
+    let mini_search_match_count = mini_search_result_sample.iter().map(|x| x.len()).sum();
 
     // Count matches for mini_search_with_positions (run once before timing)
     let mini_pos_result_sample = mini_searcher.scan(&t_queries, &target, k as u32);
@@ -138,12 +138,12 @@ fn run_bench_round(
 
     // Benchmark mini_search
     let mini_search_total = time_iterations(iterations, || {
-        let result = mini_searcher.scan(&t_queries, &target, k as u32);
+        let result = mini_searcher.search(&t_queries, &target, k as u32);
         black_box(result);
     });
 
     // Repeat, fix later adding search?
-    let mini_pos_total = time_iterations(iterations, || {
+    let mini_scan_total = time_iterations(iterations, || {
         let result = mini_searcher.scan(&t_queries, &target, k as u32);
         black_box(result);
     });
@@ -170,8 +170,8 @@ fn run_bench_round(
         iterations,
         queries_per_iter,
         num_matches: mini_pos_match_count,
-        avg_batch_ns: average_per_batch(mini_pos_total, iterations),
-        avg_per_query_ns: average_per_query(mini_pos_total, iterations, queries_per_iter),
+        avg_batch_ns: average_per_batch(mini_scan_total, iterations),
+        avg_per_query_ns: average_per_query(mini_scan_total, iterations, queries_per_iter),
     };
 
     let sassy_result = BenchResult {
