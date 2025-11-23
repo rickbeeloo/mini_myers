@@ -45,7 +45,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut rng = StdRng::seed_from_u64(42);
     let mut results = Vec::new();
 
-    let target_lens = vec![32, 64, 100, 1000, 10_000];
+    let target_lens = vec![32, 64, 100, 1000, 10_000, 100_000];
     let query_lens = vec![16];
     let ks = vec![1, 4];
     let iterations = 100;
@@ -55,27 +55,27 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     for target_len in &target_lens {
         for query_len in &query_lens {
             for k in &ks {
-                let (mini_search_result, mini_pos_result, sassy_result) =
+                let (mini_search_result, mini_scan_result, sassy_result) =
                     run_bench_round(&mut rng, *target_len, *query_len, iterations, *k, n_queries);
 
                 println!(
-                    "target={:<7} query={:<2} k={} | mini_search: {:>8.4} ms/batch ({:>8.4} µs/query, {} matches), mini_search_with_positions: {:>8.4} ms/batch ({:>8.4} µs/query, {} matches), sassy: {:>8.4} ms/batch ({:>8.4} µs/query, {} matches)",
+                    "target={:<7} query={:<2} k={} | mini_search: {:>8.4} ms/batch ({:>8.4} µs/query, {} matches), mini_scan: {:>8.4} ms/batch ({:>8.4} µs/query, {} matches), sassy: {:>8.4} ms/batch ({:>8.4} µs/query, {} matches)",
                     target_len,
                     query_len,
                     k,
                     mini_search_result.avg_batch_ms(),
                     mini_search_result.avg_per_query_us(),
                     mini_search_result.num_matches,
-                    mini_pos_result.avg_batch_ms(),
-                    mini_pos_result.avg_per_query_us(),
-                    mini_pos_result.num_matches,
+                    mini_scan_result.avg_batch_ms(),
+                    mini_scan_result.avg_per_query_us(),
+                    mini_scan_result.num_matches,
                     sassy_result.avg_batch_ms(),
                     sassy_result.avg_per_query_us(),
                     sassy_result.num_matches
                 );
 
                 results.push(mini_search_result);
-                results.push(mini_pos_result);
+                results.push(mini_scan_result);
                 results.push(sassy_result);
             }
         }
@@ -124,9 +124,9 @@ fn run_bench_round(
     let mini_search_result_sample = mini_searcher.search(&t_queries, &target, k as u32);
     let mini_search_match_count = mini_search_result_sample.iter().map(|x| x.len()).sum();
 
-    // Count matches for mini_search_with_positions (run once before timing)
-    let mini_pos_result_sample = mini_searcher.scan(&t_queries, &target, k as u32);
-    let mini_pos_match_count = mini_pos_result_sample.iter().filter(|&&x| x).count();
+    // Count matches for mini_scan (run once before timing)
+    let mini_scan_result_sample = mini_searcher.scan(&t_queries, &target, k as u32);
+    let mini_scan_match_count = mini_scan_result_sample.iter().filter(|&&x| x).count();
 
     // Benchmark sassy
     let sassy_total = time_iterations(iterations, || {
@@ -162,14 +162,14 @@ fn run_bench_round(
         avg_per_query_ns: average_per_query(mini_search_total, iterations, queries_per_iter),
     };
 
-    let mini_pos_result = BenchResult {
-        tool: "mini_search_with_positions",
+    let mini_scan_result = BenchResult {
+        tool: "mini_scan",
         target_len,
         query_len,
         k,
         iterations,
         queries_per_iter,
-        num_matches: mini_pos_match_count,
+        num_matches: mini_scan_match_count,
         avg_batch_ns: average_per_batch(mini_scan_total, iterations),
         avg_per_query_ns: average_per_query(mini_scan_total, iterations, queries_per_iter),
     };
@@ -186,7 +186,7 @@ fn run_bench_round(
         avg_per_query_ns: average_per_query(sassy_total, iterations, queries_per_iter),
     };
 
-    (mini_search_result, mini_pos_result, sassy_result)
+    (mini_search_result, mini_scan_result, sassy_result)
 }
 
 fn generate_random_dna(rng: &mut StdRng, len: usize) -> Vec<u8> {

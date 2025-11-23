@@ -1,6 +1,4 @@
 use crate::backend::SimdBackend;
-use crate::backend::U16;
-use crate::backend::U32;
 use crate::iupac::get_encoded;
 use crate::tqueries::TQueries;
 
