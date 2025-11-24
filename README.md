@@ -102,7 +102,7 @@ Note that `mini_myers` and `sassy` are not directly comparable.
 
 Search for 96 queries at k=[1,4] in a range of targets (x-axis)
 
-<img src="test_data/bench.png" alt="mini_scan vs sassy benchmark plot" width="500"/>
+<img src="test_data/bench.png" alt="mini_scan vs sassy benchmark plot" width="800"/>
 
 
 Run the same bench using `cargo bench --bench sassy`. 
