@@ -64,10 +64,6 @@ impl<B: SimdBackend> Searcher<B> {
         let length_mask = (!0u64) >> (64usize.saturating_sub(t_queries.query_length));
         let masked_alpha: u64 = alpha_pattern & length_mask;
         let initial_score = B::splat_scalar(B::scalar_from_i64(masked_alpha.count_ones() as i64));
-        // println!(
-        //     "Initial edits: {:?}",
-        //     B::to_array(initial_score).as_ref()[0]
-        // );
         let alpha_simd = B::splat_scalar(B::mask_word_to_scalar(alpha_pattern));
         let zero = B::splat_zero();
         let all_ones = B::splat_all_ones();
@@ -168,6 +164,7 @@ impl<B: SimdBackend> Searcher<B> {
     }
 
     pub fn multi_text_scan(&mut self, t_queries: &TQueries<B>, texts: &[&[u8]], k: u32) -> &[bool] {
+        // NOTE, for now this always uses overhang for the input texts
         assert_eq!(texts.len(), t_queries.n_queries);
 
         let num_blocks = t_queries.n_simd_blocks;
@@ -288,19 +285,19 @@ impl<B: SimdBackend> Searcher<B> {
                     block.vp = vp_out;
                     block.vn = vn_out;
                     block.score = score_out;
-                    //    println!("edits: {:?}", B::to_array(score_out).as_ref()[0]);
                     let gt_mask = B::simd_gt(score_out, k_simd);
-                    //  block.failure_mask &= gt_mask;
-
                     if gt_mask != B::splat_all_ones() {
-                        let mask_arr = B::to_array(gt_mask);
-                        let mask_slice = mask_arr.as_ref();
+                        let score = B::scalar_to_u32(B::to_array(score_out).as_ref()[0]);
+                        if gt_mask != B::splat_all_ones() {
+                            let mask_arr = B::to_array(gt_mask);
+                            let mask_slice = mask_arr.as_ref();
 
-                        for (lane_idx, &val) in mask_slice.iter().enumerate() {
-                            if val == zero_scalar {
-                                let query_idx = block_i * B::LANES + lane_idx;
-                                if query_idx < t_queries.n_queries {
-                                    self.positions[query_idx].push(idx);
+                            for (lane_idx, &val) in mask_slice.iter().enumerate() {
+                                if val == zero_scalar {
+                                    let query_idx = block_i * B::LANES + lane_idx;
+                                    if query_idx < t_queries.n_queries {
+                                        self.positions[query_idx].push(idx);
+                                    }
                                 }
                             }
                         }
@@ -310,7 +307,7 @@ impl<B: SimdBackend> Searcher<B> {
         }
 
         if self.alpha_pattern != !0 {
-            let eq = B::splat_zero(); // No matches at all
+            let eq = B::splat_all_ones();
             let steps_needed = t_queries.query_length;
             let blocks_ptr = self.blocks.as_mut_ptr();
             let mut current_text_pos = text.len();
@@ -332,7 +329,8 @@ impl<B: SimdBackend> Searcher<B> {
                         for (lane_idx, score) in B::to_array(score_out).as_ref().iter().enumerate()
                         {
                             let score = B::scalar_to_u32(*score);
-                            let new_score = score - (self.alpha * (i + 1) as f32).floor() as u32;
+                            let new_score = score as f32 + (self.alpha * (i + 1) as f32);
+                            let new_score = new_score.floor() as u32;
                             if new_score <= k {
                                 let query_idx = block_i * B::LANES + lane_idx;
                                 if query_idx < t_queries.n_queries {
@@ -385,7 +383,6 @@ impl<B: SimdBackend> Searcher<B> {
                         adj_score_arr.as_mut()[lane_idx] = B::scalar_from_i64(new_score as i64);
                     }
                     let adj_score = B::from_array(adj_score_arr);
-                    // println!("Adjusted score: {:?}", B::to_array(adj_score).as_ref());
                     block.score = score_out;
 
                     // Use the adjusted score for failure_mask
@@ -581,13 +578,6 @@ mod tests {
         // let queries = vec![b"GGCC".to_vec()];
         // let transposed: TQueries<crate::I32x8Backend> = TQueries::<U32>::new(&queries, false);
         let mut searcher: Searcher<crate::I32x8Backend> = Searcher::<U32>::new(Some(0.5));
-        // Allow prefix/overhang matches
-        // let text = b"AAAAAAGG";
-        // let positions = searcher.search(&transposed, text, 1);
-        // println!("suffix positions: {:?}", positions);
-        // // Check for 9 as user requested, but also tolerate 8 and 10 which are valid for k=1
-        // assert!(positions[0].contains(&9), "Should find match at index 9");
-
         // Lets also do prefix
         let queries = vec![b"GGGGGGCC".to_vec()];
         let transposed: TQueries<crate::I32x8Backend> = TQueries::<U32>::new(&queries, false);
@@ -734,7 +724,7 @@ mod tests {
         use rand::Rng;
 
         let mut rng = thread_rng();
-        let num_iterations = 1_000;
+        let num_iterations = 10_000;
         let mut len_skipped = 0;
 
         for i in 0..num_iterations {
@@ -812,16 +802,35 @@ mod tests {
         let mut mini_searcher = Searcher::<U32>::new(alpha);
 
         let num_iterations = 10_000;
-        let k = 6;
+        let k = 2;
         let mut rng = thread_rng();
+
+        // Differences always seem to happen at "rounding"
+        // where sassy passess and mini does not, though both use "floor"?
+
+        /*
+
+           GCTTATATATTGGCTGCTATACGTGTAACGGTTTGCCCTACATAGCTCGTGTGGGGCTATA
+                                                        GCTCGTGTGGCGCATAGA
+        */
 
         for i in 0..num_iterations {
             // Ranomd query length between 16 and 32
-            let q_len = rng.gen_range(16..32);
-            let text_len = rng.gen_range(50..100);
+            let q_len = rng.gen_range(5..8);
+            let text_len = rng.gen_range(10..12);
             // Ranomd text length 50, 1000
-            let text = random_dna_seq(text_len);
+            let mut text = random_dna_seq(text_len);
             let query = random_dna_seq(q_len);
+
+            // Lets add mutated query to the end of the text
+            let mutated_query = apply_edits(&query, k / 2);
+            // lets get last 90% of the text
+            let text_end = text.len().saturating_sub(mutated_query.len());
+            let mutated_prefix = mutated_query[..mutated_query.len() / 2].to_vec();
+            text.splice(
+                text_end..text_end + mutated_prefix.len(),
+                mutated_prefix.clone(),
+            );
 
             let query_transposed = TQueries::<U32>::new(&[query.clone()], false);
             let sassy_all_matches = sassy_searcher.search_all(&query, &text, k as usize);
@@ -850,7 +859,7 @@ mod tests {
             }
             eprintln!("Mini matches");
             for m in mini_matches.iter().flatten() {
-                eprintln!("Mini match text end: {}", m);
+                eprintln!("Mini match text end: {}", m + 1); // +1 to be non-inclusive like sassy
                 let match_slice =
                     &text[(m.saturating_sub(q_len + k as usize))..(m + 1).min(text.len())];
                 println!(
@@ -862,13 +871,17 @@ mod tests {
         }
     }
 
+    /*
+       GTGATTAATCATTACGC
+       GTGATTAATCA-CA-GC
+    */
     #[test]
     fn fuzz_against_sassy_no_overhang() {
         fuzz_against_sassy(None);
     }
 
     #[test]
-    #[ignore = "Not sure if this is a bug - see overhang_bug_or_not test"]
+    #[ignore = "We cant directly compare as end positions in sassy are max |t|"]
     fn fuzz_against_sassy_with_overhang() {
         fuzz_against_sassy(Some(0.5));
     }
@@ -881,6 +894,7 @@ mod tests {
         #[rustfmt::skip]
         let q =               b"TCCGGACCCATGGATT";
         let t = b"CGGCTCAAGATGAGTCC"; //^^^^^^^^^ overhang = 6.5 -> floored -> 6.0?
+                                      //                   0123456789-123456789-123456789-123
 
         // Sassy
         let mut sassy_searcher = SassySearcher::<Iupac>::new_fwd_with_overhang(0.5);
@@ -902,17 +916,17 @@ mod tests {
         // though score stil is
         // let new_score = score - (self.alpha * (i + 1) as f32).floor() as u32;
     }
+
+    #[test]
+    fn test_simple_overhang() {
+        #[rustfmt::skip]
+        let q =    b"CTTACGAATTCATTCC";
+        let t = b"ACAGAGTAACTGTTCAGTCAAGGAGTGTCTTGCTTGCTTACGAATATCTTTC";
+        let mut mini_searcher = Searcher::<U32>::new(Some(0.5));
+        let query_transposed = TQueries::<U32>::new(&[q.to_vec()], false);
+        let mini_matches = mini_searcher.search(&query_transposed, t, 3);
+        for m in mini_matches {
+            println!("{:?}", m);
+        }
+    }
 }
-
-/*
-
-    CCTCGGATATACTCCAG
-
-    sassy
-    CTGGAGTACATACTAGA
-
-    mini
-    AATTCGCTGGAGTACATACTAG
-    ATTCGCTGGAGTACATACTAGA
-
-*/
