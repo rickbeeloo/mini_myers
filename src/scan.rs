@@ -387,8 +387,8 @@ impl<B: SimdBackend> Searcher<B> {
                                 // which (often) covers multiple queries then we have
                                 // to extract the correct lane in the block
                                 .push(SimdHistoryStep {
-                                    vp: block.vp,
-                                    vn: block.vn,
+                                    vp: vp_new,
+                                    vn: vn_new,
                                     eq: B::splat_scalar(eq_scalar),
                                 });
                         }
@@ -443,8 +443,8 @@ impl<B: SimdBackend> Searcher<B> {
                                         // So this history still holds all data for the current lane
                                         // which (often) covers multiple queries then we have
                                         // to extract the correct lane in the block
-                                        vp: block.vp,
-                                        vn: block.vn,
+                                        vp: vp_out,
+                                        vn: vn_out,
                                         eq: B::splat_scalar(eq_scalar),
                                     });
                             }
@@ -475,9 +475,31 @@ impl<B: SimdBackend> Searcher<B> {
         self.trace_queries(&t_queries, approx_slices);
     }
 
-    #[inline]
-    fn bit_at(bits: u64, idx: usize) -> bool {
-        ((bits >> idx) & 1) != 0
+    fn get_score_at(
+        &self,
+        query_idx: usize,
+        step_idx: usize,
+        row_idx: isize, // can be negative for ovherhang?
+    ) -> isize {
+        // todo: overhang request?
+        let step_data = &self.history[query_idx].steps[step_idx];
+        let lane = query_idx % B::LANES;
+        let vp_bits = Self::extract_simd_lane(step_data.vp, lane);
+        let vn_bits = Self::extract_simd_lane(step_data.vn, lane);
+        let mask = if row_idx >= 63 {
+            !0u64
+        } else {
+            (1u64 << (row_idx + 1)) - 1
+        };
+
+        let ups = (vp_bits & mask).count_ones() as isize;
+        let downs = (vn_bits & mask).count_ones() as isize;
+        ups - downs
+    }
+
+    fn extract_simd_lane(simd_val: B::Simd, lane: usize) -> u64 {
+        let arr = B::to_array(simd_val);
+        B::scalar_to_u64(arr.as_ref()[lane])
     }
 
     fn trace_queries(&mut self, t_queries: &TQueries<B>, approx_slices: &[(usize, usize)]) {
@@ -495,34 +517,20 @@ impl<B: SimdBackend> Searcher<B> {
                 let vp_str = Self::format_bits(vp_bits, t_queries.query_length);
                 let vn_str = Self::format_bits(vn_bits, t_queries.query_length);
                 if start_trace_at_step == cur_step {
+                    let edits_here = self.get_score_at(
+                        query_idx,
+                        cur_step,
+                        (t_queries.query_length - 1) as isize,
+                    );
                     println!(
-                        "{:4} | {} | {} | {} < TRACE START",
-                        cur_step, eq_str, vp_str, vn_str
+                        "{:4} | {} | {} | {} < TRACE START (EDITS: {})",
+                        cur_step, eq_str, vp_str, vn_str, edits_here
                     );
                 } else {
                     println!("{:4} | {} | {} | {}", cur_step, eq_str, vp_str, vn_str);
                 }
             }
         }
-    }
-
-    fn compute_score_at(
-        step: &SimdHistoryStep<B::Simd>,
-        query_idx: usize,
-        bit_pos: usize,
-    ) -> isize {
-        let vp_bits = Self::extract_scalar_to_u64(step.vp, query_idx);
-        let vn_bits = Self::extract_scalar_to_u64(step.vn, query_idx);
-
-        let mut score = 0isize;
-        for i in 0..=bit_pos {
-            if Self::bit_at(vp_bits, i) {
-                score += 1;
-            } else if Self::bit_at(vn_bits, i) {
-                score -= 1;
-            }
-        }
-        score
     }
 
     fn format_bits(value: u64, num_bits: usize) -> String {
@@ -588,17 +596,14 @@ impl<B: SimdBackend> Searcher<B> {
                     block.score = score_out;
                     let gt_mask = B::simd_gt(score_out, k_simd);
                     if gt_mask != B::splat_all_ones() {
-                        let score = B::scalar_to_u64(B::to_array(score_out).as_ref()[0]);
-                        if gt_mask != B::splat_all_ones() {
-                            let mask_arr = B::to_array(gt_mask);
-                            let mask_slice = mask_arr.as_ref();
+                        let mask_arr = B::to_array(gt_mask);
+                        let mask_slice = mask_arr.as_ref();
 
-                            for (lane_idx, &val) in mask_slice.iter().enumerate() {
-                                if val == zero_scalar {
-                                    let query_idx = block_i * B::LANES + lane_idx;
-                                    if query_idx < t_queries.n_queries {
-                                        self.positions[query_idx].push(idx);
-                                    }
+                        for (lane_idx, &val) in mask_slice.iter().enumerate() {
+                            if val == zero_scalar {
+                                let query_idx = block_i * B::LANES + lane_idx;
+                                if query_idx < t_queries.n_queries {
+                                    self.positions[query_idx].push(idx);
                                 }
                             }
                         }
