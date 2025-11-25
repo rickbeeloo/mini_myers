@@ -26,18 +26,10 @@ impl<B: SimdBackend> Default for Searcher<B> {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub enum AlignmentOperation {
-    Match,
-    Subst,
-    Ins,
-    Del,
-}
-
 #[derive(Debug, Clone)]
 pub struct Alignment {
     pub score: u32,
-    pub operations: Vec<AlignmentOperation>,
+    pub operations: Cigar,
     pub start: usize,
     pub end: usize,
     pub query_idx: usize,
@@ -551,7 +543,8 @@ impl<B: SimdBackend> Searcher<B> {
         let max_bit = query_len - 1;
         let mut curr_step = max_step;
         let mut curr_bit = max_bit;
-        let mut ops = Vec::new();
+
+        let mut cigar = Cigar::default();
 
         loop {
             if curr_step < 0 || curr_bit < 0 {
@@ -578,21 +571,21 @@ impl<B: SimdBackend> Searcher<B> {
             // Match/Subs
             if curr_score == score_diag + cost_diag {
                 if is_match {
-                    ops.push(AlignmentOperation::Match);
+                    cigar.push(pa_types::CigarOp::Match);
                 } else {
-                    ops.push(AlignmentOperation::Subst);
+                    cigar.push(pa_types::CigarOp::Sub);
                 }
                 curr_step -= 1;
                 curr_bit -= 1;
             }
             // Del
             else if curr_score == score_left + 1 {
-                ops.push(AlignmentOperation::Del);
+                cigar.push(pa_types::CigarOp::Del);
                 curr_step -= 1;
             }
             // Ins
             else if curr_score == score_up + 1 {
-                ops.push(AlignmentOperation::Ins);
+                cigar.push(pa_types::CigarOp::Ins);
                 curr_bit -= 1;
             }
         }
@@ -600,12 +593,12 @@ impl<B: SimdBackend> Searcher<B> {
         // Final edits, todo: assert with expected?
         let final_score = self.get_score_at(query_idx, max_step as usize, max_bit);
 
-        ops.reverse();
+        cigar.reverse();
 
         // todo: rescale to slice positions not relative to input slice
         Alignment {
             score: final_score as u32,
-            operations: ops,
+            operations: cigar,
             start: slice.0 + (curr_step + 1).max(0) as usize,
             end: slice.0 + steps.len(),
             query_idx,
@@ -831,7 +824,6 @@ mod tests {
 
     #[test]
     fn test_multi_trace() {
-        use super::AlignmentOperation;
         let mut searcher = Searcher::<U32>::new(None);
 
         let full_text = b"XXAAGTXXXXXTTTTTTTT";
