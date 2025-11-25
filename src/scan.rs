@@ -379,11 +379,13 @@ impl<B: SimdBackend> Searcher<B> {
                     for lane in 0..B::LANES {
                         let q_idx = base_idx + lane;
                         if q_idx < approx_slices.len() {
-                            // Only save history if the lane was active/in text at this step (i < texts[q_idx].len())
                             let eq_scalar = eq_arr.as_ref()[lane];
                             self.history
                                 .get_unchecked_mut(q_idx)
                                 .steps
+                                // So this history still holds all data for the current lane
+                                // which (often) covers multiple queries then we have
+                                // to extract the correct lane in the block
                                 .push(SimdHistoryStep {
                                     vp: block.vp,
                                     vn: block.vn,
