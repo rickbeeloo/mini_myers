@@ -1,6 +1,7 @@
-use crate::backend::SimdBackend;
 use crate::iupac::get_encoded;
 use crate::tqueries::TQueries;
+use crate::{backend::SimdBackend, tqueries};
+use pa_types::{Cigar, CigarOp};
 
 #[derive(Clone, Copy, Default)]
 struct BlockState<S: Copy> {
@@ -16,12 +17,39 @@ pub struct Searcher<B: SimdBackend> {
     positions: Vec<Vec<usize>>,
     alpha_pattern: u64,
     alpha: f32,
+    history: Vec<QueryHistory<B::Simd>>,
 }
 
 impl<B: SimdBackend> Default for Searcher<B> {
     fn default() -> Self {
         Self::new(None)
     }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum AlignmentOperation {
+    Match,
+    Subst,
+    Ins,
+    Del,
+}
+
+#[derive(Debug, Clone)]
+pub struct Alignment {
+    pub score: u32,
+    pub operations: Vec<AlignmentOperation>,
+    pub start: usize,
+    pub end: usize,
+    pub query_idx: usize,
+}
+
+pub struct QueryHistory<S: Copy> {
+    pub steps: Vec<SimdHistoryStep<S>>,
+}
+struct SimdHistoryStep<S: Copy> {
+    vp: S,
+    vn: S,
+    eq: S,
 }
 
 impl<B: SimdBackend> Searcher<B> {
@@ -33,6 +61,7 @@ impl<B: SimdBackend> Searcher<B> {
             positions: Vec::new(),
             alpha_pattern: Self::generate_alpha_mask(alpha_val, 64),
             alpha: alpha_val,
+            history: Vec::new(),
         }
     }
 
@@ -56,6 +85,10 @@ impl<B: SimdBackend> Searcher<B> {
         }
         if self.positions.len() < total_queries {
             self.positions.resize(total_queries, Vec::new());
+        }
+        if self.history.len() < total_queries {
+            self.history
+                .resize_with(total_queries, || QueryHistory { steps: Vec::new() });
         }
     }
 
@@ -243,6 +276,272 @@ impl<B: SimdBackend> Searcher<B> {
         self.extract_bools(t_queries)
     }
 
+    pub fn multi_text_trace(
+        &mut self,
+        t_queries: &TQueries<B>,
+        text: &[u8],
+        approx_slices: &[(usize, usize)], // Note: these can be "beyond" the text length for overhang
+        k: u32,
+    ) {
+        assert_eq!(approx_slices.len(), t_queries.n_queries);
+
+        let num_blocks = t_queries.n_simd_blocks;
+        self.ensure_capacity(num_blocks, t_queries.n_queries);
+
+        for hist in self.history.iter_mut().take(t_queries.n_queries) {
+            hist.steps.clear();
+        }
+
+        let length_mask = (!0u64) >> (64usize.saturating_sub(t_queries.query_length));
+        self.reset_state(t_queries, self.alpha_pattern & length_mask);
+
+        let k_simd = B::splat_scalar(B::scalar_from_i64(k as i64));
+        let last_bit_shift = (t_queries.query_length - 1) as u32;
+        let last_bit_mask = B::splat_one() << last_bit_shift;
+        let all_ones = B::splat_all_ones();
+        let zero_scalar = B::scalar_from_i64(0);
+        let one_mask: <B as SimdBackend>::Scalar = B::mask_word_to_scalar(!0);
+
+        let blocks_ptr = self.blocks.as_mut_ptr();
+        let max_len = approx_slices
+            .iter()
+            .map(|(start, end)| end - start)
+            .max()
+            .unwrap_or(0)
+            + 1; // add one so we also go beyond the longest slice
+        println!("max len: {}", max_len);
+
+        for i in 0..max_len {
+            for block_i in 0..num_blocks {
+                unsafe {
+                    let block = &mut *blocks_ptr.add(block_i);
+
+                    let mut eq_arr = B::LaneArray::default();
+                    let mut keep_mask_arr = B::LaneArray::default();
+
+                    let eq_slice = eq_arr.as_mut();
+                    let keep_slice = keep_mask_arr.as_mut();
+                    let base_idx = block_i * B::LANES;
+
+                    for lane in 0..B::LANES {
+                        let q_idx = base_idx + lane;
+
+                        if q_idx < approx_slices.len() {
+                            // We can have < LANES queries/text pairs
+
+                            // We are within the text
+                            let (start, end) = approx_slices[q_idx]; // INCLUSIVE end = end
+                            let rel_pos = i + start;
+                            if rel_pos <= end {
+                                let cur_char = text[rel_pos];
+                                println!(
+                                    "LANE {} - Current char: {} at idx {}",
+                                    lane, cur_char as char, rel_pos
+                                );
+                                let enc = get_encoded(cur_char) as usize;
+                                eq_slice[lane] =
+                                    B::mask_word_to_scalar(t_queries.peq_masks[enc][q_idx]);
+                                println!(
+                                    "eq slice bits: {} ",
+                                    Self::format_bits(
+                                        B::scalar_to_u64(B::mask_word_to_scalar(
+                                            t_queries.peq_masks[enc][q_idx]
+                                        )),
+                                        t_queries.query_length
+                                    )
+                                );
+                                keep_slice[lane] = one_mask;
+
+                            // We go beyond the text
+                            } else {
+                                // We just zero eq as "no matches" if we go beyond the text length
+                                // kinda like 'X'
+                                eq_slice[lane] = zero_scalar;
+                                keep_slice[lane] = zero_scalar;
+                            }
+                        }
+                    }
+
+                    let eq = B::from_array(eq_arr);
+                    let keep_mask = B::from_array(keep_mask_arr);
+                    let freeze_mask = all_ones ^ keep_mask; // Inverse of keep
+
+                    let (vp_new, vn_new, score_new) = Self::myers_step(
+                        block.vp,
+                        block.vn,
+                        block.score,
+                        eq,
+                        last_bit_shift,
+                        last_bit_mask,
+                    );
+
+                    let eq_arr = B::to_array(eq);
+                    for lane in 0..B::LANES {
+                        let q_idx = base_idx + lane;
+                        if q_idx < approx_slices.len() {
+                            // Only save history if the lane was active/in text at this step (i < texts[q_idx].len())
+                            let eq_scalar = eq_arr.as_ref()[lane];
+                            self.history
+                                .get_unchecked_mut(q_idx)
+                                .steps
+                                .push(SimdHistoryStep {
+                                    vp: block.vp,
+                                    vn: block.vn,
+                                    eq: B::splat_scalar(eq_scalar),
+                                });
+                        }
+                    }
+
+                    // Blending, if we are 'in text' we take the new values, if
+                    // we are 'in overhang' we take the old value (freezing the end state)
+                    block.vp = (vp_new & keep_mask) | (block.vp & freeze_mask);
+                    block.vn = (vn_new & keep_mask) | (block.vn & freeze_mask);
+                    block.score = (score_new & keep_mask) | (block.score & freeze_mask);
+                    let current_fail = block.failure_mask & B::simd_gt(score_new, k_simd);
+                    block.failure_mask =
+                        (current_fail & keep_mask) | (block.failure_mask & freeze_mask);
+                }
+            }
+        }
+
+        if self.alpha_pattern != !0 {
+            let eq = B::splat_all_ones(); // All ones, all matches at all
+            let last_bit_shift = (t_queries.query_length - 1) as u32;
+            let last_bit_mask = B::splat_one() << last_bit_shift;
+            let steps_needed = t_queries.query_length;
+
+            let blocks_ptr = self.blocks.as_mut_ptr();
+
+            for i in 0..steps_needed {
+                for block_i in 0..num_blocks {
+                    unsafe {
+                        let block = &mut *blocks_ptr.add(block_i);
+
+                        let (vp_out, vn_out, score_out) = Self::myers_step(
+                            block.vp,
+                            block.vn,
+                            block.score,
+                            eq,
+                            last_bit_shift,
+                            last_bit_mask,
+                        );
+
+                        let base_idx = block_i * B::LANES;
+                        let eq_arr = B::to_array(eq);
+
+                        for lane in 0..B::LANES {
+                            let q_idx = base_idx + lane;
+                            if q_idx < approx_slices.len() {
+                                let eq_scalar = eq_arr.as_ref()[lane];
+
+                                self.history
+                                    .get_unchecked_mut(q_idx)
+                                    .steps
+                                    .push(SimdHistoryStep {
+                                        // So this history still holds all data for the current lane
+                                        // which (often) covers multiple queries then we have
+                                        // to extract the correct lane in the block
+                                        vp: block.vp,
+                                        vn: block.vn,
+                                        eq: B::splat_scalar(eq_scalar),
+                                    });
+                            }
+                        }
+
+                        block.vp = vp_out;
+                        block.vn = vn_out;
+
+                        // Adjust the score for this overhang step to account for alpha
+                        let score_out_arr = B::to_array(score_out);
+                        let mut adj_score_arr = score_out_arr;
+                        for lane_idx in 0..B::LANES {
+                            let s = B::scalar_to_u64(score_out_arr.as_ref()[lane_idx]);
+                            let new_score = s + ((self.alpha * (i + 1) as f32).floor() as u64);
+                            adj_score_arr.as_mut()[lane_idx] = B::scalar_from_i64(new_score as i64);
+                        }
+                        let adj_score = B::from_array(adj_score_arr);
+                        block.score = score_out;
+
+                        // Use the adjusted score for failure_mask
+                        let gt_mask = B::simd_gt(adj_score, k_simd);
+                        block.failure_mask &= gt_mask;
+                    }
+                }
+            }
+        }
+
+        self.trace_queries(&t_queries, approx_slices);
+    }
+
+    #[inline]
+    fn bit_at(bits: u64, idx: usize) -> bool {
+        ((bits >> idx) & 1) != 0
+    }
+
+    fn trace_queries(&mut self, t_queries: &TQueries<B>, approx_slices: &[(usize, usize)]) {
+        for (query_idx, hist) in self.history.iter().enumerate().take(t_queries.n_queries) {
+            let start_trace_at_step = approx_slices[query_idx].1 - approx_slices[query_idx].0;
+
+            // Print bit-rows (optional)
+            let n_steps = hist.steps.len();
+            for (step_idx, step) in hist.steps.iter().rev().enumerate() {
+                let cur_step = n_steps - step_idx - 1;
+                let eq_bits = Self::extract_scalar_to_u64(step.eq, query_idx);
+                let vp_bits = Self::extract_scalar_to_u64(step.vp, query_idx);
+                let vn_bits = Self::extract_scalar_to_u64(step.vn, query_idx);
+                let eq_str = Self::format_bits(eq_bits, t_queries.query_length);
+                let vp_str = Self::format_bits(vp_bits, t_queries.query_length);
+                let vn_str = Self::format_bits(vn_bits, t_queries.query_length);
+                if start_trace_at_step == cur_step {
+                    println!(
+                        "{:4} | {} | {} | {} < TRACE START",
+                        cur_step, eq_str, vp_str, vn_str
+                    );
+                } else {
+                    println!("{:4} | {} | {} | {}", cur_step, eq_str, vp_str, vn_str);
+                }
+            }
+        }
+    }
+
+    fn compute_score_at(
+        step: &SimdHistoryStep<B::Simd>,
+        query_idx: usize,
+        bit_pos: usize,
+    ) -> isize {
+        let vp_bits = Self::extract_scalar_to_u64(step.vp, query_idx);
+        let vn_bits = Self::extract_scalar_to_u64(step.vn, query_idx);
+
+        let mut score = 0isize;
+        for i in 0..=bit_pos {
+            if Self::bit_at(vp_bits, i) {
+                score += 1;
+            } else if Self::bit_at(vn_bits, i) {
+                score -= 1;
+            }
+        }
+        score
+    }
+
+    fn format_bits(value: u64, num_bits: usize) -> String {
+        let mut s = String::with_capacity(num_bits);
+        for i in (0..num_bits).rev() {
+            if (value >> i) & 1 == 1 {
+                s.push('1');
+            } else {
+                s.push('0');
+            }
+        }
+        s
+    }
+
+    fn extract_scalar_to_u64(simd_vec: B::Simd, query_idx: usize) -> u64 {
+        let lane_idx = query_idx % B::LANES;
+        let arr = B::to_array(simd_vec);
+        let scalar = arr.as_ref()[lane_idx];
+        B::scalar_to_u64(scalar)
+    }
+
     pub fn search(&mut self, t_queries: &TQueries<B>, text: &[u8], k: u32) -> &[Vec<usize>] {
         let num_blocks = t_queries.n_simd_blocks;
 
@@ -287,7 +586,7 @@ impl<B: SimdBackend> Searcher<B> {
                     block.score = score_out;
                     let gt_mask = B::simd_gt(score_out, k_simd);
                     if gt_mask != B::splat_all_ones() {
-                        let score = B::scalar_to_u32(B::to_array(score_out).as_ref()[0]);
+                        let score = B::scalar_to_u64(B::to_array(score_out).as_ref()[0]);
                         if gt_mask != B::splat_all_ones() {
                             let mask_arr = B::to_array(gt_mask);
                             let mask_slice = mask_arr.as_ref();
@@ -328,7 +627,7 @@ impl<B: SimdBackend> Searcher<B> {
                         block.score = score_out;
                         for (lane_idx, score) in B::to_array(score_out).as_ref().iter().enumerate()
                         {
-                            let score = B::scalar_to_u32(*score);
+                            let score = B::scalar_to_u64(*score);
                             let new_score = score as f32 + (self.alpha * (i + 1) as f32);
                             let new_score = new_score.floor() as u32;
                             if new_score <= k {
@@ -349,7 +648,7 @@ impl<B: SimdBackend> Searcher<B> {
 
     #[inline(always)]
     fn process_overhangs(&mut self, t_queries: &TQueries<B>, k_simd: B::Simd, num_blocks: usize) {
-        let eq = B::splat_zero(); // All zeros, no matches at all
+        let eq = B::splat_all_ones(); // All zeros, no matches at all
         let last_bit_shift = (t_queries.query_length - 1) as u32;
         let last_bit_mask = B::splat_one() << last_bit_shift;
         let steps_needed = t_queries.query_length;
@@ -377,9 +676,8 @@ impl<B: SimdBackend> Searcher<B> {
                     let score_out_arr = B::to_array(score_out);
                     let mut adj_score_arr = score_out_arr;
                     for lane_idx in 0..B::LANES {
-                        let s = B::scalar_to_u32(score_out_arr.as_ref()[lane_idx]);
-                        let new_score =
-                            s.saturating_sub((self.alpha * (i + 1) as f32).floor() as u32);
+                        let s = B::scalar_to_u64(score_out_arr.as_ref()[lane_idx]);
+                        let new_score = s + ((self.alpha * (i + 1) as f32).floor() as u64);
                         adj_score_arr.as_mut()[lane_idx] = B::scalar_from_i64(new_score as i64);
                     }
                     let adj_score = B::from_array(adj_score_arr);
@@ -444,6 +742,46 @@ mod tests {
     use super::Searcher;
     use crate::backend::U32;
     use crate::tqueries::TQueries;
+
+    #[test]
+    fn test_multi_trace() {
+        use super::AlignmentOperation;
+        let mut searcher = Searcher::<U32>::new(None);
+
+        let full_text = b"XXAAGTXXXXXTTTTTTTT";
+        //                           0123456789-12345678
+        //                             2  5     11    18
+
+        let queries = vec![
+            b"AACT".as_slice(), // Lane 0: Exact match
+            b"TTTT".as_slice(), // Lane 1: Substitution
+        ];
+
+        // let texts = vec![
+        //     b"AAGT".as_slice(),     // Lane 0
+        //     b"TTTTTTTT".as_slice(), // Lane 1 (G -> A subst)
+        // ];
+
+        let t_queries = TQueries::<U32>::new(
+            &queries.into_iter().map(|q| q.to_vec()).collect::<Vec<_>>(),
+            false,
+        );
+
+        let approx_slices = vec![
+            (1, 5),   // Lane 0: Exact match
+            (11, 18), // Lane 1: Substitution
+        ];
+
+        // Make sure the slices are expected
+        for (start, end) in approx_slices.iter() {
+            let slice = &full_text[*start..=*end];
+            println!("Slice: {:?}", String::from_utf8_lossy(slice));
+        }
+
+        // // Run Traceback
+        let results =
+            searcher.multi_text_trace(&t_queries, full_text.as_ref(), approx_slices.as_slice(), 2);
+    }
 
     #[test]
     fn test_simple_match() {

@@ -45,7 +45,7 @@ pub trait SimdBackend: Copy + 'static + Send + Sync + Default + std::fmt::Debug 
 
     /// Convert byte slice to query block type
     fn to_query_block(slice: &[u8]) -> Self::QueryBlock;
-    fn scalar_to_u32(value: Self::Scalar) -> u32;
+    fn scalar_to_u64(value: Self::Scalar) -> u64;
 
     // Minimal splat helpers - these are thin wrappers but necessary since we can't call splat generically
     fn splat_all_ones() -> Self::Simd;
@@ -112,8 +112,8 @@ impl SimdBackend for I32x8Backend {
     }
 
     #[inline(always)]
-    fn scalar_to_u32(value: Self::Scalar) -> u32 {
-        value
+    fn scalar_to_u64(value: Self::Scalar) -> u64 {
+        value as u64
     }
 
     // Thanks Ragnar
@@ -189,8 +189,8 @@ impl SimdBackend for I64x4Backend {
     }
 
     #[inline(always)]
-    fn scalar_to_u32(value: Self::Scalar) -> u32 {
-        value as u32
+    fn scalar_to_u64(value: Self::Scalar) -> u64 {
+        value
     }
 
     // Thanks Ragnar
@@ -266,8 +266,8 @@ impl SimdBackend for I16x16Backend {
     }
 
     #[inline(always)]
-    fn scalar_to_u32(value: Self::Scalar) -> u32 {
-        value as u32
+    fn scalar_to_u64(value: Self::Scalar) -> u64 {
+        value as u64
     }
 
     #[inline(always)]
