@@ -28,7 +28,7 @@ impl<B: SimdBackend> Default for Searcher<B> {
 
 #[derive(Debug, Clone)]
 pub struct Alignment {
-    pub score: u32,
+    pub edits: u32,
     pub operations: Cigar,
     pub start: usize,
     pub end: usize,
@@ -597,7 +597,7 @@ impl<B: SimdBackend> Searcher<B> {
 
         // todo: rescale to slice positions not relative to input slice
         Alignment {
-            score: final_score as u32,
+            edits: final_score as u32,
             operations: cigar,
             start: slice.0 + (curr_step + 1).max(0) as usize,
             end: slice.0 + steps.len(),
