@@ -504,6 +504,9 @@ impl<B: SimdBackend> Searcher<B> {
 
     fn trace_queries(&mut self, t_queries: &TQueries<B>, approx_slices: &[(usize, usize)]) {
         for (query_idx, hist) in self.history.iter().enumerate().take(t_queries.n_queries) {
+            let aln = self.traceback_single(query_idx, t_queries, approx_slices[query_idx]);
+            println!("Alignment: {:?}", aln);
+
             let start_trace_at_step = approx_slices[query_idx].1 - approx_slices[query_idx].0;
 
             // Print bit-rows (optional)
@@ -530,6 +533,82 @@ impl<B: SimdBackend> Searcher<B> {
                     println!("{:4} | {} | {} | {}", cur_step, eq_str, vp_str, vn_str);
                 }
             }
+        }
+    }
+
+    fn traceback_single(
+        &self,
+        query_idx: usize,
+        t_queries: &TQueries<B>,
+        slice: (usize, usize),
+    ) -> Alignment {
+        let history = &self.history[query_idx];
+        let steps = &history.steps;
+        let query_len = t_queries.query_length as isize;
+
+        let max_step = (slice.1 - slice.0) as isize;
+
+        let max_bit = query_len - 1;
+        let mut curr_step = max_step;
+        let mut curr_bit = max_bit;
+        let mut ops = Vec::new();
+
+        loop {
+            if curr_step < 0 || curr_bit < 0 {
+                break;
+            }
+
+            let curr_score = if curr_step >= 0 && curr_bit >= 0 {
+                self.get_score_at(query_idx, curr_step as usize, curr_bit)
+            } else {
+                // todo: think of overhang
+                0
+            };
+
+            let score_diag = self.get_score_at(query_idx, (curr_step - 1) as usize, curr_bit - 1);
+            let score_left = self.get_score_at(query_idx, (curr_step - 1) as usize, curr_bit);
+            let score_up = self.get_score_at(query_idx, curr_step as usize, curr_bit - 1);
+
+            let step = &steps[curr_step as usize];
+            let lane = query_idx % B::LANES;
+            let eq_bits = Self::extract_simd_lane(step.eq, lane);
+            let is_match = (eq_bits & (1u64 << curr_bit)) != 0;
+            let cost_diag = if is_match { 0 } else { 1 };
+
+            // Match/Subs
+            if curr_score == score_diag + cost_diag {
+                if is_match {
+                    ops.push(AlignmentOperation::Match);
+                } else {
+                    ops.push(AlignmentOperation::Subst);
+                }
+                curr_step -= 1;
+                curr_bit -= 1;
+            }
+            // Del
+            else if curr_score == score_left + 1 {
+                ops.push(AlignmentOperation::Del);
+                curr_step -= 1;
+            }
+            // Ins
+            else if curr_score == score_up + 1 {
+                ops.push(AlignmentOperation::Ins);
+                curr_bit -= 1;
+            }
+        }
+
+        // Final edits, todo: assert with expected?
+        let final_score = self.get_score_at(query_idx, max_step as usize, max_bit);
+
+        ops.reverse();
+
+        // todo: rescale to slice positions not relative to input slice
+        Alignment {
+            score: final_score as u32,
+            operations: ops,
+            start: slice.0 + (curr_step + 1).max(0) as usize,
+            end: slice.0 + steps.len(),
+            query_idx,
         }
     }
 
