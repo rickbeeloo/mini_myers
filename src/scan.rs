@@ -272,10 +272,17 @@ impl<B: SimdBackend> Searcher<B> {
         &mut self,
         t_queries: &TQueries<B>,
         text: &[u8],
-        approx_slices: &[(usize, usize)], // Note: these can be "beyond" the text length for overhang
+        ends: &[usize],
         k: u32,
     ) {
-        assert_eq!(approx_slices.len(), t_queries.n_queries);
+        assert_eq!(ends.len(), t_queries.n_queries);
+
+        // todo: get rid of this alloc, we can calc this all on the flye
+        let left_buffer = t_queries.query_length + k as usize;
+        let approx_slices = ends
+            .iter()
+            .map(|end| (end.saturating_sub(left_buffer), *end))
+            .collect::<Vec<_>>();
 
         let num_blocks = t_queries.n_simd_blocks;
         self.ensure_capacity(num_blocks, t_queries.n_queries);
@@ -324,7 +331,9 @@ impl<B: SimdBackend> Searcher<B> {
                             // We are within the text
                             let (start, end) = approx_slices[q_idx]; // INCLUSIVE end = end
                             let rel_pos = i + start;
-                            if rel_pos <= end {
+                            println!("rel_pos: {}", rel_pos);
+                            println!("end: {}", end);
+                            if rel_pos < text.len() {
                                 let cur_char = text[rel_pos];
                                 println!(
                                     "LANE {} - Current char: {} at idx {}",
@@ -464,29 +473,42 @@ impl<B: SimdBackend> Searcher<B> {
             }
         }
 
-        self.trace_queries(&t_queries, approx_slices);
+        self.trace_queries(&t_queries, &approx_slices);
     }
 
     fn get_score_at(
         &self,
         query_idx: usize,
-        step_idx: usize,
-        row_idx: isize, // can be negative for ovherhang?
+        target_idx: isize,    // target idx
+        query_pos_idx: isize, // query_idx
     ) -> isize {
         // todo: overhang request?
-        let step_data = &self.history[query_idx].steps[step_idx];
+        println!(
+            "Query idx: {}, target idx: {}, query pos idx: {}",
+            query_idx, target_idx, query_pos_idx
+        );
+
+        let (target_idx, overhang_cost) = if target_idx < 0 {
+            let overhang_cost = (target_idx.abs() as f32 * self.alpha).floor() as isize;
+            println!("Overhang cost: {}", overhang_cost);
+            (0, overhang_cost)
+        } else {
+            (target_idx, 0)
+        };
+
+        let step_data = &self.history[query_idx].steps[target_idx as usize];
         let lane = query_idx % B::LANES;
         let vp_bits = Self::extract_simd_lane(step_data.vp, lane);
         let vn_bits = Self::extract_simd_lane(step_data.vn, lane);
-        let mask = if row_idx >= 63 {
+        let mask = if query_pos_idx >= 63 {
             !0u64
         } else {
-            (1u64 << (row_idx + 1)) - 1
+            (1u64 << (query_pos_idx + 1)) - 1
         };
 
         let ups = (vp_bits & mask).count_ones() as isize;
         let downs = (vn_bits & mask).count_ones() as isize;
-        ups - downs
+        (ups - downs) + overhang_cost
     }
 
     fn extract_simd_lane(simd_val: B::Simd, lane: usize) -> u64 {
@@ -512,9 +534,10 @@ impl<B: SimdBackend> Searcher<B> {
                 let vp_str = Self::format_bits(vp_bits, t_queries.query_length);
                 let vn_str = Self::format_bits(vn_bits, t_queries.query_length);
                 if start_trace_at_step == cur_step {
+                    println!("cur_step: {}", cur_step);
                     let edits_here = self.get_score_at(
                         query_idx,
-                        cur_step,
+                        cur_step as isize,
                         (t_queries.query_length - 1) as isize,
                     );
                     println!(
@@ -537,6 +560,7 @@ impl<B: SimdBackend> Searcher<B> {
         let history = &self.history[query_idx];
         let steps = &history.steps;
         let query_len = t_queries.query_length as isize;
+        println!("Slice: {:?}", slice);
 
         let max_step = (slice.1 - slice.0) as isize;
 
@@ -551,16 +575,15 @@ impl<B: SimdBackend> Searcher<B> {
                 break;
             }
 
-            let curr_score = if curr_step >= 0 && curr_bit >= 0 {
-                self.get_score_at(query_idx, curr_step as usize, curr_bit)
-            } else {
-                // todo: think of overhang
-                0
-            };
+            println!("curr_step: {}, curr_bit: {}", curr_step, curr_bit);
+            let curr_score = self.get_score_at(query_idx, curr_step, curr_bit);
 
-            let score_diag = self.get_score_at(query_idx, (curr_step - 1) as usize, curr_bit - 1);
-            let score_left = self.get_score_at(query_idx, (curr_step - 1) as usize, curr_bit);
-            let score_up = self.get_score_at(query_idx, curr_step as usize, curr_bit - 1);
+            println!("Diag");
+            let score_diag = self.get_score_at(query_idx, (curr_step - 1), curr_bit - 1);
+            println!("Left");
+            let score_left = self.get_score_at(query_idx, (curr_step - 1), curr_bit);
+            println!("Up");
+            let score_up = self.get_score_at(query_idx, curr_step, curr_bit - 1);
 
             let step = &steps[curr_step as usize];
             let lane = query_idx % B::LANES;
@@ -591,7 +614,7 @@ impl<B: SimdBackend> Searcher<B> {
         }
 
         // Final edits, todo: assert with expected?
-        let final_score = self.get_score_at(query_idx, max_step as usize, max_bit);
+        let final_score = self.get_score_at(query_idx, max_step, max_bit);
 
         cigar.reverse();
 
@@ -825,40 +848,40 @@ mod tests {
     #[test]
     fn test_multi_trace() {
         let mut searcher = Searcher::<U32>::new(None);
-
         let full_text = b"XXAAGTXXXXXTTTTTTTT";
-        //                           0123456789-12345678
-        //                             2  5     11    18
+        let queries = vec![b"AACT".to_vec(), b"TTTT".to_vec()];
+        // encode queries
+        let t_queries = TQueries::<U32>::new(&queries, false);
+        // end output from `search` for example
+        let ends = vec![5, 18];
+        searcher.multi_text_trace(&t_queries, full_text.as_ref(), &ends, 2);
+        // MMXM, MMMM
+    }
 
-        let queries = vec![
-            b"AACT".as_slice(), // Lane 0: Exact match
-            b"TTTT".as_slice(), // Lane 1: Substitution
-        ];
+    #[test]
+    fn test_multi_trace_suffix_overhang() {
+        let mut searcher = Searcher::<U32>::new(Some(0.5));
+        let full_text = b"XXXXTTTT";
+        //                              TTTTAAAA
+        //                          0123456789-1
+        let queries = vec![b"TTTTAAAA".to_vec()];
+        // encode queries
+        let t_queries = TQueries::<U32>::new(&queries, false);
+        // end output from `search` for example
+        let ends = vec![11];
+        searcher.multi_text_trace(&t_queries, full_text.as_ref(), &ends, 2);
+        // Note the trace itself works, will add SUB,SUB,SUB,SUB beyond text length
+        // for which we have to correct the edits, and perhaps just drop the 4X's?
+    }
 
-        // let texts = vec![
-        //     b"AAGT".as_slice(),     // Lane 0
-        //     b"TTTTTTTT".as_slice(), // Lane 1 (G -> A subst)
-        // ];
-
-        let t_queries = TQueries::<U32>::new(
-            &queries.into_iter().map(|q| q.to_vec()).collect::<Vec<_>>(),
-            false,
-        );
-
-        let approx_slices = vec![
-            (1, 5),   // Lane 0: Exact match
-            (11, 18), // Lane 1: Substitution
-        ];
-
-        // Make sure the slices are expected
-        for (start, end) in approx_slices.iter() {
-            let slice = &full_text[*start..=*end];
-            println!("Slice: {:?}", String::from_utf8_lossy(slice));
-        }
-
-        // // Run Traceback
-        let results =
-            searcher.multi_text_trace(&t_queries, full_text.as_ref(), approx_slices.as_slice(), 2);
+    #[test]
+    fn test_multi_trace_prefix_overhang() {
+        let mut searcher = Searcher::<U32>::new(Some(0.5));
+        let full_text = b"AAAAXXXX";
+        let queries = vec![b"TTTTAAAA".to_vec()];
+        let t_queries = TQueries::<U32>::new(&queries, false);
+        let ends = vec![3];
+        searcher.multi_text_trace(&t_queries, full_text.as_ref(), &ends, 2);
     }
 
     #[test]
