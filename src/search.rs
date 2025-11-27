@@ -35,6 +35,7 @@ pub struct Alignment {
     pub start: usize,
     pub end: usize,
     pub query_idx: usize,
+    pub strand: Strand,
 }
 
 // We use this in multi-trace
@@ -427,7 +428,13 @@ impl<B: SimdBackend> Searcher<B> {
         // todo: also re-use this alloc via self
         let mut alignments = Vec::with_capacity(batch_size);
         for i in 0..batch_size {
-            let aln = self.traceback_single(i, t_queries, approx_slices[i], text.len() as isize);
+            let aln = self.traceback_single(
+                i,
+                query_indices[i],
+                t_queries,
+                approx_slices[i],
+                text.len() as isize,
+            );
             alignments.push(aln);
         }
 
@@ -501,7 +508,8 @@ impl<B: SimdBackend> Searcher<B> {
     #[inline(always)]
     fn traceback_single(
         &self,
-        query_idx: usize,
+        query_idx: usize,          // in CURRENT batch
+        original_query_idx: usize, // originally based on encoding
         t_queries: &TQueries<B>,
         slice: (usize, usize),
         text_len: isize,
@@ -588,7 +596,12 @@ impl<B: SimdBackend> Searcher<B> {
             operations: cigar,
             start: text_start,
             end: (slice.1 as usize).min((text_len - 1) as usize),
-            query_idx,
+            query_idx: original_query_idx % t_queries.n_original_queries, // for rc, use fwd idx
+            strand: if original_query_idx >= t_queries.n_original_queries {
+                Strand::Rc
+            } else {
+                Strand::Fwd
+            },
         }
     }
 
@@ -964,16 +977,12 @@ mod tests {
         dna
     }
 
-    fn fuzz_against_sassy(alpha: Option<f32>) {
+    fn fuzz_against_sassy(alpha: Option<f32>, include_rc: bool) {
         use crate::backend::U32;
         use rand::thread_rng;
         use rand::Rng;
         use sassy::profiles::Iupac;
         use sassy::Searcher as SassySearcher;
-
-        // NOTE: rc test would be nice but sassy is q vs rc(text), whereas
-        // in mini it's rc(q) vs text - thus not identical end positions
-
         // Sassy searcher
         let mut sassy_searcher = if alpha.is_some() {
             SassySearcher::<Iupac>::new_fwd_with_overhang(alpha.unwrap())
@@ -1004,21 +1013,75 @@ mod tests {
                 mutated_prefix.clone(),
             );
 
-            let query_transposed = TQueries::<U32>::new(&[query.clone()], false);
-            let sassy_matches = sassy_searcher.search_all(&query, &text, k as usize);
-            let mini_matches = mini_searcher.trace_all_hits(&query_transposed, &text, k as u32);
+            let query_transposed = TQueries::<U32>::new(&[query.clone()], include_rc);
 
-            let mut sassy_pairs = sassy_matches
-                .iter()
-                .map(|m| {
-                    (
-                        m.text_start,
-                        m.text_end,
-                        m.cost as isize,
-                        m.cigar.to_string(),
-                    )
-                })
-                .collect::<Vec<_>>();
+            let (sassy_matches, sassy_pairs) = if !include_rc {
+                let matches = sassy_searcher.search_all(&query, &text, k as usize);
+                let mut pairs = matches
+                    .iter()
+                    .map(|m| {
+                        (
+                            m.text_start,
+                            m.text_end,
+                            m.cost as isize,
+                            m.cigar.to_string(),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                pairs
+                    .dedup_by_key(|(start, end, cost, cigar)| (*start, *end, *cost, cigar.clone()));
+                // Sort them
+                pairs.sort_by_key(|(start, end, cost, cigar)| (*start, *end, *cost, cigar.clone()));
+
+                (matches, pairs)
+            } else {
+                // fwd search
+                let mut matches = sassy_searcher.search_all(&query, &text, k as usize);
+                // rc search
+                let query_rc = crate::iupac::reverse_complement(&query);
+                let mut rc_matches = sassy_searcher.search_all(&query_rc, &text, k as usize);
+
+                // For pairs first get unique per fwd, rc
+                let mut fwd_pairs = matches
+                    .iter()
+                    .map(|m| {
+                        (
+                            m.text_start,
+                            m.text_end,
+                            m.cost as isize,
+                            m.cigar.to_string(),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                fwd_pairs
+                    .dedup_by_key(|(start, end, cost, cigar)| (*start, *end, *cost, cigar.clone()));
+
+                let mut rc_pairs = rc_matches
+                    .iter()
+                    .map(|m| {
+                        (
+                            m.text_start,
+                            m.text_end,
+                            m.cost as isize,
+                            m.cigar.to_string(),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                rc_pairs
+                    .dedup_by_key(|(start, end, cost, cigar)| (*start, *end, *cost, cigar.clone()));
+
+                fwd_pairs.extend(rc_pairs.iter().cloned());
+
+                // Sort it
+                fwd_pairs
+                    .sort_by_key(|(start, end, cost, cigar)| (*start, *end, *cost, cigar.clone()));
+
+                // combine both forward and reverse complement matches
+                matches.append(&mut rc_matches);
+                (matches, fwd_pairs)
+            };
+
+            let mini_matches = mini_searcher.trace_all_hits(&query_transposed, &text, k as u32);
 
             let mut mini_pairs = mini_matches
                 .iter()
@@ -1032,33 +1095,26 @@ mod tests {
                 })
                 .collect::<Vec<_>>();
 
-            sassy_pairs
-                .sort_by_key(|(start, end, cost, cigar)| (*start, *end, *cost, cigar.clone()));
-
-            // NOTE without dedup we can have a duplicate (start, end, cost) perhaps different query start?
-            sassy_pairs
-                .dedup_by_key(|(start, end, cost, cigar)| (*start, *end, *cost, cigar.clone()));
-
             mini_pairs
                 .sort_by_key(|(start, end, edits, cigar)| (*start, *end, *edits, cigar.clone()));
 
-            eprintln!("Query: {:?}", String::from_utf8_lossy(&query));
-            eprintln!("Text:  {:?}", String::from_utf8_lossy(&text));
+            // eprintln!("Query: {:?}", String::from_utf8_lossy(&query));
+            // eprintln!("Text:  {:?}", String::from_utf8_lossy(&text));
 
-            // Print nicely formatted columns for better readability,
-            // using same spacing for header as for data lines
-            eprintln!(
-                "{:>5}:{:<5} {:<14} {:<16}     {:>5}:{:<5} {:<14} {:<16}     {}",
-                "Sassy",
-                "end",
-                "Sassy cost",
-                "Sassy cigar",
-                "Mini",
-                "end",
-                "Mini edits",
-                "Mini cigar",
-                "Equal"
-            );
+            // // Print nicely formatted columns for better readability,
+            // // using same spacing for header as for data lines
+            // eprintln!(
+            //     "{:>5}:{:<5} {:<14} {:<16}     {:>5}:{:<5} {:<14} {:<16}     {}",
+            //     "Sassy",
+            //     "end",
+            //     "Sassy cost",
+            //     "Sassy cigar",
+            //     "Mini",
+            //     "end",
+            //     "Mini edits",
+            //     "Mini cigar",
+            //     "Equal"
+            // );
             for (s, m) in sassy_pairs.iter().zip(mini_pairs.iter()) {
                 let (s_start, s_end, s_cost, s_cigar) = s;
                 let (m_start, m_end, m_edits, m_cigar) = m;
@@ -1075,22 +1131,28 @@ mod tests {
                     if s == m { "OK" } else { "FAIL" }
                 );
             }
-            eprintln!(
-                "Same length: {}, diff: {}",
-                sassy_pairs.len() == mini_pairs.len(),
-                sassy_pairs.len() - mini_pairs.len()
-            );
-            if sassy_pairs.len() != mini_pairs.len() {
-                if sassy_pairs.len() < mini_pairs.len() {
-                    for m in mini_pairs.iter() {
-                        println!("\tMini: {:?}", m);
-                    }
-                } else {
-                    for m in sassy_pairs.iter() {
-                        println!("\tSassy: {:?}", m);
-                    }
-                }
-            }
+            // eprintln!(
+            //     "Same length: {}, diff: {}",
+            //     sassy_pairs.len() == mini_pairs.len(),
+            //     sassy_pairs.len() as isize - mini_pairs.len() as isize
+            // );
+            // if sassy_pairs.len() != mini_pairs.len() {
+            //     if sassy_pairs.len() < mini_pairs.len() {
+            //         for m in mini_pairs.iter() {
+            //             eprintln!("\tMini: {:?}", m);
+            //         }
+            //         for m in sassy_matches.iter() {
+            //             eprintln!("\tSassy: {:?}", m);
+            //         }
+            //     } else {
+            //         for m in sassy_matches.iter() {
+            //             eprintln!("\tSassy: {:?}", m);
+            //         }
+            //         for m in mini_pairs.iter() {
+            //             eprintln!("\tMini: {:?}", m);
+            //         }
+            //     }
+            // }
 
             assert_eq!(sassy_pairs, mini_pairs);
         }
@@ -1098,34 +1160,72 @@ mod tests {
 
     #[test]
     fn fuzz_without_overhang() {
-        fuzz_against_sassy(None);
+        fuzz_against_sassy(None, false);
     }
 
     #[test]
     fn fuzz_with_overhang() {
-        fuzz_against_sassy(Some(0.5));
+        fuzz_against_sassy(Some(0.5), false);
+    }
+
+    #[test]
+    fn fuzz_without_overhang_inc_rc() {
+        fuzz_against_sassy(None, true);
+    }
+
+    #[test]
+    fn fuzz_with_overhang_inc_rc() {
+        fuzz_against_sassy(Some(0.5), true);
     }
 
     #[test]
     fn mini_trace_bug() {
         use crate::backend::U32;
+        use crate::iupac::reverse_complement;
         use crate::TQueries;
+        use sassy::profiles::Iupac;
+        use sassy::Searcher as SassySearcher;
 
-        let q = b"CGTAC";
-        let t = b"CATCCCCGAGT";
-        //                      ||||--|
-        //                      CAGACTA
-        //                   0123456789
+        let q = b"GTCCGAC";
+        let q_rc = crate::iupac::reverse_complement(q);
+        //                   0123456789-1
+        let t = b"AAACGAAGTCCTTAGACTGACTTGGCACCAGTATACTCACTTTTTTGTCTCC";
+        println!("q: {:?}", String::from_utf8_lossy(q));
+        println!("q_rc: {:?}", String::from_utf8_lossy(&q_rc));
+
         let k = 2;
         let mut searcher = Searcher::<U32>::new(Some(0.5));
-        let query_transposed = TQueries::<U32>::new(&[q.to_vec()], false);
+        let query_transposed = TQueries::<U32>::new(&[q.to_vec()], true);
         let mini_matches = searcher.trace_all_hits(&query_transposed, t, k as u32);
         for m in mini_matches {
             println!(
-                "edits: {} cigar: {} end: {}",
+                "Mini edits: {} cigar: {} end: {} strand: {:?}",
                 m.edits,
                 m.operations.to_string(),
-                m.end
+                m.end,
+                m.strand
+            );
+        }
+
+        let mut sassy_searcher = SassySearcher::<Iupac>::new_fwd_with_overhang(0.5);
+        let sassy_matches = sassy_searcher.search_all(q, &t, k as usize);
+        for m in sassy_matches {
+            println!(
+                "Sassy edits: {} cigar: {} end: {} strand: {:?}",
+                m.cost,
+                m.cigar.to_string(),
+                m.text_end,
+                m.strand
+            );
+        }
+        let sassy_matches_rc = sassy_searcher.search_all(&q_rc, &t, k as usize);
+        for m in sassy_matches_rc {
+            println!(
+                "Sassy RC edits: {} cigar: {} end: {} strand: {:?}",
+                m.cost,
+                m.cigar.to_string(),
+                m.text_end,
+                m.strand
             );
         }
     }
