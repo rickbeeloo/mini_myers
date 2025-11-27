@@ -1,3 +1,6 @@
+mod edlib_bench;
+
+use edlib_bench::{get_edlib_config, run_edlib, sim_data::Alphabet};
 use mini_myers::backend::U32;
 use mini_myers::search::Searcher as MiniSearcher;
 use mini_myers::TQueries;
@@ -54,13 +57,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     for target_len in &target_lens {
         for query_len in &query_lens {
             for k in &ks {
-                let (mini_search, sassy) =
+                let (mini_search, sassy, edlib) =
                     run_bench_round(&mut rng, *target_len, *query_len, iterations, *k, n_queries);
 
                 println!(
                     "T={:<7} Q={:<2} K={} | \
                     Search: {:>7.3}ms ({:>7.3}µs/q) | \
-                    Sassy:  {:>7.3}ms ({:>7.3}µs/q)",
+                    Sassy:  {:>7.3}ms ({:>7.3}µs/q) | \
+                    Edlib:  {:>7.3}ms ({:>7.3}µs/q)",
                     target_len,
                     query_len,
                     k,
@@ -68,10 +72,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     mini_search.avg_per_query_us(),
                     sassy.avg_batch_ms(),
                     sassy.avg_per_query_us(),
+                    edlib.avg_batch_ms(),
+                    edlib.avg_per_query_us(),
                 );
 
                 results.push(mini_search);
                 results.push(sassy);
+                results.push(edlib);
             }
         }
     }
@@ -92,7 +99,7 @@ fn run_bench_round(
     iterations: usize,
     k: u8,
     n_queries: usize,
-) -> (BenchResult, BenchResult) {
+) -> (BenchResult, BenchResult, BenchResult) {
     let target = generate_random_dna(rng, target_len);
     let mut queries = Vec::new();
     for _ in 0..n_queries {
@@ -103,6 +110,9 @@ fn run_bench_round(
     let t_queries_u32 = TQueries::<U32>::new(&queries, true);
     let mut searcher_u32 = MiniSearcher::<U32>::new(None);
 
+    // Setup edlib config
+    let edlib_config = get_edlib_config(k as i32, &Alphabet::Dna);
+
     let mut sassy_matches = 0;
     for q in &queries {
         sassy_matches += sassy_searcher.search_all(q, &target, k as usize).len();
@@ -111,6 +121,15 @@ fn run_bench_round(
     // Mini Search Count
     let mini_search_res = searcher_u32.trace_all_hits(&t_queries_u32, &target, k as u32);
     let mini_search_matches: usize = mini_search_res.len();
+
+    // Edlib Count - count matches by checking edit distance
+    let mut edlib_matches = 0;
+    for q in &queries {
+        let result = run_edlib(q, &target, &edlib_config);
+        if result.editDistance >= 0 && result.editDistance <= k as i32 {
+            edlib_matches += 1;
+        }
+    }
 
     // Mini Scan Count
     // let mini_scan_res = searcher_u32.trace_all_hits(&t_queries_u32, &target, k as u32);
@@ -128,6 +147,14 @@ fn run_bench_round(
     let mini_search_time = time_iterations(iterations, || {
         let m = searcher_u32.trace_all_hits(&t_queries_u32, &target, k as u32);
         black_box(m);
+    });
+
+    // Time Edlib
+    let edlib_time = time_iterations(iterations, || {
+        for q in &queries {
+            let result = run_edlib(q, &target, &edlib_config);
+            black_box(result);
+        }
     });
 
     // // Time Mini Scan
@@ -174,7 +201,19 @@ fn run_bench_round(
         avg_per_query_ns: average_per_query(sassy_time, iterations, queries_per_iter),
     };
 
-    (res_search, res_sassy)
+    let res_edlib = BenchResult {
+        tool: "edlib",
+        target_len,
+        query_len,
+        k,
+        iterations,
+        queries_per_iter,
+        num_matches: edlib_matches,
+        avg_batch_ns: average_per_batch(edlib_time, iterations),
+        avg_per_query_ns: average_per_query(edlib_time, iterations, queries_per_iter),
+    };
+
+    (res_search, res_sassy, res_edlib)
 }
 
 fn generate_random_dna(rng: &mut StdRng, len: usize) -> Vec<u8> {

@@ -31,6 +31,9 @@ needletail = "0.6.3"
 [dev-dependencies]
 sassy = { git = "https://github.com/RagnarGrootKoerkamp/sassy.git", features = ["expose_trace_code"] }
 rand = "0.8.5"
+edlib_rs = { git = "https://github.com/pairwise-alignment/edlib-rs" }
+once_cell = "1.19"
+
 
 [[bench]]
 name = "sassy"
