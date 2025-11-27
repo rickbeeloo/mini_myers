@@ -1,7 +1,7 @@
 mod edlib_bench;
 
 use edlib_bench::{get_edlib_config, run_edlib, sim_data::Alphabet};
-use mini_myers::backend::U32;
+use mini_myers::backend::{SimdBackend, U16, U32};
 use mini_myers::search::Searcher as MiniSearcher;
 use mini_myers::TQueries;
 use rand::rngs::StdRng;
@@ -107,8 +107,6 @@ fn run_bench_round(
     }
 
     let mut sassy_searcher = SassySearcher::<Iupac>::new_rc();
-    let t_queries_u32 = TQueries::<U32>::new(&queries, true);
-    let mut searcher_u32 = MiniSearcher::<U32>::new(None);
 
     // Setup edlib config
     let edlib_config = get_edlib_config(k as i32, &Alphabet::Dna);
@@ -118,9 +116,11 @@ fn run_bench_round(
         sassy_matches += sassy_searcher.search_all(q, &target, k as usize).len();
     }
 
-    // Mini Search Count
-    let mini_search_res = searcher_u32.trace_all_hits(&t_queries_u32, &target, k as u32);
-    let mini_search_matches: usize = mini_search_res.len();
+    let (mini_search_matches, mini_search_time) = if query_len == 16 {
+        run_mini_bench::<U16>(&queries, &target, k, iterations)
+    } else {
+        run_mini_bench::<U32>(&queries, &target, k, iterations)
+    };
 
     // Edlib Count - count matches by checking edit distance
     let mut edlib_matches = 0;
@@ -141,12 +141,6 @@ fn run_bench_round(
             let m = sassy_searcher.search(q, &target, k as usize);
             black_box(m);
         }
-    });
-
-    // Time Mini Search
-    let mini_search_time = time_iterations(iterations, || {
-        let m = searcher_u32.trace_all_hits(&t_queries_u32, &target, k as u32);
-        black_box(m);
     });
 
     // Time Edlib
@@ -214,6 +208,26 @@ fn run_bench_round(
     };
 
     (res_search, res_sassy, res_edlib)
+}
+
+fn run_mini_bench<B: SimdBackend>(
+    queries: &[Vec<u8>],
+    target: &[u8],
+    k: u8,
+    iterations: usize,
+) -> (usize, Duration) {
+    let t_queries = TQueries::<B>::new(queries, true);
+    let mut searcher = MiniSearcher::<B>::new(None);
+
+    let mini_search_res = searcher.trace_all_hits(&t_queries, target, k as u32);
+    let mini_search_matches: usize = mini_search_res.len();
+
+\    let mini_search_time = time_iterations(iterations, || {
+        let m = searcher.trace_all_hits(&t_queries, target, k as u32);
+        black_box(m);
+    });
+
+    (mini_search_matches, mini_search_time)
 }
 
 fn generate_random_dna(rng: &mut StdRng, len: usize) -> Vec<u8> {
