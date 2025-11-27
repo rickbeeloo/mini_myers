@@ -1,5 +1,5 @@
 use mini_myers::backend::U32;
-use mini_myers::scan::Searcher as MiniSearcher;
+use mini_myers::search::Searcher as MiniSearcher;
 use mini_myers::TQueries;
 use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
@@ -48,33 +48,29 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let target_lens = vec![16, 32, 100, 1000, 1500, 2000, 10_000, 100_000];
     let query_lens = vec![16, 32];
     let ks = vec![1, 4];
-    let iterations = 100;
+    let iterations = 1000;
     let n_queries = 96;
 
     for target_len in &target_lens {
         for query_len in &query_lens {
             for k in &ks {
-                let (mini_search, mini_scan, sassy) =
+                let (mini_search, sassy) =
                     run_bench_round(&mut rng, *target_len, *query_len, iterations, *k, n_queries);
 
                 println!(
                     "T={:<7} Q={:<2} K={} | \
                     Search: {:>7.3}ms ({:>7.3}µs/q) | \
-                    Scan:   {:>7.3}ms ({:>7.3}µs/q) | \
                     Sassy:  {:>7.3}ms ({:>7.3}µs/q)",
                     target_len,
                     query_len,
                     k,
                     mini_search.avg_batch_ms(),
                     mini_search.avg_per_query_us(),
-                    mini_scan.avg_batch_ms(),
-                    mini_scan.avg_per_query_us(),
                     sassy.avg_batch_ms(),
                     sassy.avg_per_query_us(),
                 );
 
                 results.push(mini_search);
-                results.push(mini_scan);
                 results.push(sassy);
             }
         }
@@ -96,7 +92,7 @@ fn run_bench_round(
     iterations: usize,
     k: u8,
     n_queries: usize,
-) -> (BenchResult, BenchResult, BenchResult) {
+) -> (BenchResult, BenchResult) {
     let target = generate_random_dna(rng, target_len);
     let mut queries = Vec::new();
     for _ in 0..n_queries {
@@ -109,16 +105,16 @@ fn run_bench_round(
 
     let mut sassy_matches = 0;
     for q in &queries {
-        sassy_matches += sassy_searcher.search(q, &target, k as usize).len();
+        sassy_matches += sassy_searcher.search_all(q, &target, k as usize).len();
     }
 
     // Mini Search Count
-    let mini_search_res = searcher_u32.search(&t_queries_u32, &target, k as u32);
-    let mini_search_matches: usize = mini_search_res.iter().map(|v| v.len()).sum();
+    let mini_search_res = searcher_u32.trace_all_hits(&t_queries_u32, &target, k as u32);
+    let mini_search_matches: usize = mini_search_res.len();
 
     // Mini Scan Count
-    let mini_scan_res = searcher_u32.scan(&t_queries_u32, &target, k as u32);
-    let mini_scan_matches: usize = mini_scan_res.iter().filter(|&&b| b).count();
+    // let mini_scan_res = searcher_u32.trace_all_hits(&t_queries_u32, &target, k as u32);
+    // let mini_scan_matches: usize = mini_scan_res.iter().filter(|&&b| b).count();
 
     // Time Sassy
     let sassy_time = time_iterations(iterations, || {
@@ -130,15 +126,15 @@ fn run_bench_round(
 
     // Time Mini Search
     let mini_search_time = time_iterations(iterations, || {
-        let m = searcher_u32.search(&t_queries_u32, &target, k as u32);
+        let m = searcher_u32.trace_all_hits(&t_queries_u32, &target, k as u32);
         black_box(m);
     });
 
-    // Time Mini Scan
-    let mini_scan_time = time_iterations(iterations, || {
-        let m = searcher_u32.scan(&t_queries_u32, &target, k as u32);
-        black_box(m);
-    });
+    // // Time Mini Scan
+    // let mini_scan_time = time_iterations(iterations, || {
+    //     let m = searcher_u32.scan(&t_queries_u32, &target, k as u32);
+    //     black_box(m);
+    // });
 
     let queries_per_iter = queries.len();
 
@@ -154,17 +150,17 @@ fn run_bench_round(
         avg_per_query_ns: average_per_query(mini_search_time, iterations, queries_per_iter),
     };
 
-    let res_scan = BenchResult {
-        tool: "mini_scan",
-        target_len,
-        query_len,
-        k,
-        iterations,
-        queries_per_iter,
-        num_matches: mini_scan_matches,
-        avg_batch_ns: average_per_batch(mini_scan_time, iterations),
-        avg_per_query_ns: average_per_query(mini_scan_time, iterations, queries_per_iter),
-    };
+    // let res_scan = BenchResult {
+    //     tool: "mini_scan",
+    //     target_len,
+    //     query_len,
+    //     k,
+    //     iterations,
+    //     queries_per_iter,
+    //     num_matches: mini_scan_matches,
+    //     avg_batch_ns: average_per_batch(mini_scan_time, iterations),
+    //     avg_per_query_ns: average_per_query(mini_scan_time, iterations, queries_per_iter),
+    // };
 
     let res_sassy = BenchResult {
         tool: "sassy",
@@ -178,7 +174,7 @@ fn run_bench_round(
         avg_per_query_ns: average_per_query(sassy_time, iterations, queries_per_iter),
     };
 
-    (res_search, res_scan, res_sassy)
+    (res_search, res_sassy)
 }
 
 fn generate_random_dna(rng: &mut StdRng, len: usize) -> Vec<u8> {

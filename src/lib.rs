@@ -5,9 +5,10 @@ pub mod constant {
 
 pub mod backend;
 mod iupac;
-pub mod scan;
+pub mod search;
 pub mod tqueries;
 
 pub use backend::{I16x16Backend, I32x8Backend, I64x4Backend, SimdBackend, U16, U32, U64};
-pub use scan::Searcher;
+//pub use scan::Searcher;
+pub use search::Searcher;
 pub use tqueries::TQueries;

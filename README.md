@@ -13,94 +13,82 @@ Most likely you are looking for [sassy](https://github.com/RagnarGrootKoerkamp/s
 
 --- 
 
-#### How to use:
+### How to use
 
+#### Basic search (find hits)
 
-#### Basic usage
-This will return boolean results indicating whether each query matches (within `k` edits). 
-
-
-### Presence of queries in texts
+This will return `SearchHit` results indicating where each query matches (within `k` edits).
 
 ```rust
 use mini_myers::{Searcher, TQueries};
-use mini_myers::backend::{U32, U64};
-
-let mut scanner = Searcher::<U32>::new(None);
-let queries = vec![b"ATG".to_vec(), b"TTG".to_vec()];
-let encoded = TQueries::<U32>::new(&queries, false); //false = only fwd, true = fwd + rc
-let target = b"CCCTCGCCCCCCATGCCCCC";
-let results = scanner.scan(&encoded, target, 0);
-// results = [true, false]
-assert!(results[0]); // "ATG" matches
-assert!(!results[1]); // "TTG" doesn't match
-```
-
-### End locations of queries in texts
-
-```rust
-use mini_myers::{Searcher, TQueries};
-use mini_myers::backend::{U32, U64};
+use mini_myers::backend::U32;
 
 let mut searcher = Searcher::<U32>::new(None);
-let queries = vec![b"ATG".to_vec(), b"TTG".to_vec()];
-let encoded = TQueries::<U32>::new(&queries, false); 
-let target = b"CCCTCGCCCCCCATGCCCCC";
-let results = searcher.search(&encoded, target, 0);
-// results = [[14], []]
+let queries = vec![b"ACGT".to_vec(), b"TGCA".to_vec()];
+let t_queries = TQueries::<U32>::new(&queries, false); // false = only forward, true = forward + reverse complement
+let text = b"AAACGTTTGCAAA";
+let k = 0; // exact match only
+
+let hits = searcher.search_with_hits(&t_queries, text, k);
+
+// hits contains SearchHit { query_idx, end_position }
+assert_eq!(hits.len(), 2);
+assert_eq!(hits[0].query_idx, 0);
+assert_eq!(hits[0].end_position, 5); // ACGT ends at position 5
 ```
 
-### Presence or locations with overhang
-We use the `alpha` parameter to reduce the penalty for "overhanging" query sequence
-at either end of the text: `overhang_length * alpha`:
-```
-    q: AAAACCC
-           |||
-    t:     CCCGGGGGGGGGGGGGG
-       ^^^^ overhang (AAAA)
-```
+#### Full alignment with traceback
+
+This will return full `Alignment` results with CIGAR strings, edit counts, and start/end positions.
+
 ```rust
 use mini_myers::{Searcher, TQueries};
-use mini_myers::backend::{U32, U64};
-use mini_myers::{Searcher, TQueries};
-let mut searcher = Searcher::<U32>::new(Some(0.5));
-let queries = vec![b"AAAACCC".to_vec()];
-let encoded = TQueries::<U32>::new(&queries, false);
-let target = b"CCCGGGGGGGGGGGGGG";
-// 4 * 0.5(alpha) = 2
-let results = searcher.search(&encoded, target, 2);
-// results = [[0,1]]
+use mini_myers::backend::U32;
+
+let k = 2;
+let mut searcher = Searcher::<U32>::new(None);
+let queries = vec![b"ACGT".to_vec()];
+let t_queries = TQueries::<U32>::new(&queries, false);
+let text = b"AAATGTAAA"; // ATGT has 1 substitution from ACGT
+
+let alignments = searcher.trace_all_hits(&t_queries, text, k);
+
+for aln in alignments {
+    println!(
+        "query_idx: {}, edits: {}, cigar: {}, start: {}, end: {}",
+        aln.query_idx,
+        aln.edits,
+        aln.operations.to_string(),
+        aln.start,
+        aln.end
+    );
+}
 ```
 
-### Multi-text scan (presence)
-If you first run a search using a prefix, then want to compare the
-entire sequence you can use `multi_text_scan` to compare a list 
-of queries to a list of texts, where queries[0] is compared to texts[0], 
-and so on:
+#### With overhang support
+
+You can enable suffix/prefix overhang matching by providing an `alpha` parameter (cost per overhang character):
 
 ```rust
-let queries = vec![b"GGCC".to_vec(), b"AAAA".to_vec(), b"CCGG".to_vec()];
-let texts: Vec<&[u8]> = vec![b"AAAAAAAAAAAAAAAAAAAAAAAAAAGG", 
-                             b"GGGGGGGG", 
-                             b"AAAAAAAAAACC"];
+use mini_myers::{Searcher, TQueries};
+use mini_myers::backend::U32;
 
-let transposed = TQueries::<U32>::new(&queries, false);
+// alpha=0.5 means each overhang character costs 0.5 edits
 let mut searcher = Searcher::<U32>::new(Some(0.5));
-let matches = searcher.multi_text_scan(&transposed, &texts, 1);
-assert_eq!(matches, vec![true, false, true]);
+let queries = vec![b"ACGT".to_vec()];
+let t_queries = TQueries::<U32>::new(&queries, false);
+let text = b"AC"; // Query can match with suffix overhang (GT)
+let k = 2;
 
+let alignments = searcher.trace_all_hits(&t_queries, text, k);
 ```
 
 
 ---
 
 #### Little bench
-Note that `mini_myers` and `sassy` are not directly comparable.
-- `sassy`: also preforms a traceback 
-- `mini scan`: only returns presence
-- `mini search`: returns end position (but not traceback)
-
-Search for 96 queries at k=[1,4] in a range of targets (x-axis)
+Comparing mini search against [sassy](https://github.com/RagnarGrootKoerkamp/sassy.git) `search_all`
+for 96 queries of length [16, 32] at k=[1,4] in a range of targets (x-axis)
 
 <img src="test_data/bench.png" alt="mini_scan vs sassy benchmark plot" width="800"/>
 
