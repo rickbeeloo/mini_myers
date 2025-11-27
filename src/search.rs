@@ -1003,7 +1003,7 @@ mod tests {
         };
         let mut mini_searcher = Searcher::<TestBackend>::new(alpha);
 
-        let num_iterations = 100_000;
+        let num_iterations = 1_000_000;
         let mut rng = thread_rng();
 
         for _i in 0..num_iterations {
