@@ -621,12 +621,16 @@ impl<B: SimdBackend> Searcher<B> {
 
 #[cfg(test)]
 mod tests {
-
     use super::*;
     use crate::backend::SimdBackend;
+    // use crate::backend::U32;
+    use rand::{thread_rng, Rng};
+    use sassy::profiles::Iupac;
+    use sassy::Searcher as SassySearcher;
+    use std::collections::{HashMap, HashSet};
 
     #[cfg(test)]
-    type TestBackend = crate::backend::U32; // todo: trace on 16, 64
+    type TestBackend = crate::backend::U16; // change for tests on u16, u32, and u64 backends
 
     #[test]
     fn test_search_with_hits_simple() {
@@ -977,12 +981,19 @@ mod tests {
         dna
     }
 
+    // To have the compiler happy
+    macro_rules! backend_max_query {
+        ($backend:ty) => {{
+            match stringify!($backend) {
+                "U16" => 16,
+                "U32" => 32,
+                "U64" => 64,
+                _ => panic!("Unsupported backend"),
+            }
+        }};
+    }
+
     fn fuzz_against_sassy(alpha: Option<f32>, include_rc: bool) {
-        use crate::backend::U32;
-        use rand::thread_rng;
-        use rand::Rng;
-        use sassy::profiles::Iupac;
-        use sassy::Searcher as SassySearcher;
         // Sassy searcher
         let mut sassy_searcher = if alpha.is_some() {
             SassySearcher::<Iupac>::new_fwd_with_overhang(alpha.unwrap())
@@ -990,16 +1001,17 @@ mod tests {
             println!("Creating sassy searcher without overhang");
             SassySearcher::<Iupac>::new_fwd()
         };
-        let mut mini_searcher = Searcher::<U32>::new(alpha);
+        let mut mini_searcher = Searcher::<TestBackend>::new(alpha);
 
-        let num_iterations = 1_000_000;
+        let num_iterations = 100_000;
         let mut rng = thread_rng();
 
         for _i in 0..num_iterations {
             // K in range of 0..10
             let k = rng.gen_range(0..10);
-            // Random query length between 5 and 8
-            let q_len = rng.gen_range(5..8);
+
+            let q_len = rng.gen_range(1..=backend_max_query!(TestBackend));
+
             let text_len = rng.gen_range(10..60);
             let mut text = random_dna_seq(text_len);
             let query = random_dna_seq(q_len);
@@ -1013,7 +1025,7 @@ mod tests {
                 mutated_prefix.clone(),
             );
 
-            let query_transposed = TQueries::<U32>::new(&[query.clone()], include_rc);
+            let query_transposed = TQueries::<TestBackend>::new(&[query.clone()], include_rc);
 
             let (sassy_matches, sassy_pairs) = if !include_rc {
                 let matches = sassy_searcher.search_all(&query, &text, k as usize);
@@ -1098,23 +1110,6 @@ mod tests {
             mini_pairs
                 .sort_by_key(|(start, end, edits, cigar)| (*start, *end, *edits, cigar.clone()));
 
-            // eprintln!("Query: {:?}", String::from_utf8_lossy(&query));
-            // eprintln!("Text:  {:?}", String::from_utf8_lossy(&text));
-
-            // // Print nicely formatted columns for better readability,
-            // // using same spacing for header as for data lines
-            // eprintln!(
-            //     "{:>5}:{:<5} {:<14} {:<16}     {:>5}:{:<5} {:<14} {:<16}     {}",
-            //     "Sassy",
-            //     "end",
-            //     "Sassy cost",
-            //     "Sassy cigar",
-            //     "Mini",
-            //     "end",
-            //     "Mini edits",
-            //     "Mini cigar",
-            //     "Equal"
-            // );
             for (s, m) in sassy_pairs.iter().zip(mini_pairs.iter()) {
                 let (s_start, s_end, s_cost, s_cigar) = s;
                 let (m_start, m_end, m_edits, m_cigar) = m;
@@ -1131,28 +1126,6 @@ mod tests {
                     if s == m { "OK" } else { "FAIL" }
                 );
             }
-            // eprintln!(
-            //     "Same length: {}, diff: {}",
-            //     sassy_pairs.len() == mini_pairs.len(),
-            //     sassy_pairs.len() as isize - mini_pairs.len() as isize
-            // );
-            // if sassy_pairs.len() != mini_pairs.len() {
-            //     if sassy_pairs.len() < mini_pairs.len() {
-            //         for m in mini_pairs.iter() {
-            //             eprintln!("\tMini: {:?}", m);
-            //         }
-            //         for m in sassy_matches.iter() {
-            //             eprintln!("\tSassy: {:?}", m);
-            //         }
-            //     } else {
-            //         for m in sassy_matches.iter() {
-            //             eprintln!("\tSassy: {:?}", m);
-            //         }
-            //         for m in mini_pairs.iter() {
-            //             eprintln!("\tMini: {:?}", m);
-            //         }
-            //     }
-            // }
 
             assert_eq!(sassy_pairs, mini_pairs);
         }
@@ -1160,32 +1133,141 @@ mod tests {
 
     #[test]
     fn fuzz_without_overhang() {
-        fuzz_against_sassy(None, false);
+        fuzz_against_sassy_batch(None, false);
     }
 
     #[test]
     fn fuzz_with_overhang() {
-        fuzz_against_sassy(Some(0.5), false);
+        fuzz_against_sassy_batch(Some(0.5), false);
     }
 
     #[test]
     fn fuzz_without_overhang_inc_rc() {
-        fuzz_against_sassy(None, true);
+        fuzz_against_sassy_batch(None, true);
     }
 
     #[test]
     fn fuzz_with_overhang_inc_rc() {
-        fuzz_against_sassy(Some(0.5), true);
+        fuzz_against_sassy_batch(Some(0.5), true);
     }
 
+    type MatchTuple = (usize, usize, isize, String);
+
+    fn normalize_pairs(pairs: &mut Vec<MatchTuple>) {
+        pairs.dedup_by_key(|(s, e, c, cig)| (*s, *e, *c, cig.clone()));
+        pairs.sort_unstable_by_key(|(s, e, c, cig)| (*s, *e, *c, cig.clone()));
+    }
+
+    fn search_sassy_query(
+        searcher: &mut SassySearcher<Iupac>,
+        query: &[u8],
+        text: &[u8],
+        k: usize,
+    ) -> Vec<MatchTuple> {
+        searcher
+            .search_all(&query, &text, k)
+            .iter()
+            .map(|m| {
+                (
+                    m.text_start,
+                    m.text_end,
+                    m.cost as isize,
+                    m.cigar.to_string(),
+                )
+            })
+            .collect()
+    }
+
+    fn fuzz_against_sassy_batch(alpha: Option<f32>, include_rc: bool) {
+        let mut sassy_searcher = if let Some(a) = alpha {
+            SassySearcher::<Iupac>::new_fwd_with_overhang(a)
+        } else {
+            SassySearcher::<Iupac>::new_fwd()
+        };
+        let mut mini_searcher = Searcher::<TestBackend>::new(alpha);
+
+        let mut rng = thread_rng();
+
+        for _ in 0..10_000 {
+            let k = rng.gen_range(0..10);
+            let q_len = rng.gen_range(5..8);
+            let text_len = rng.gen_range(10..60);
+            let batch_size = rng.gen_range(1..=25);
+
+            let mut text = random_dna_seq(text_len);
+            let queries: Vec<Vec<u8>> = (0..batch_size).map(|_| random_dna_seq(q_len)).collect();
+
+            // Insert query for overhang cases to not dependend on random
+            if let Some(query) = queries.first() {
+                let mutated = apply_edits(query, k / 2);
+                let text_end = text.len().saturating_sub(mutated.len());
+                let prefix = &mutated[..mutated.len() / 2];
+                text.splice(text_end..text_end + prefix.len(), prefix.iter().copied());
+            }
+
+            // Mini
+            let mini_encoded = TQueries::<TestBackend>::new(&queries, include_rc);
+            let mut mini_map: HashMap<usize, Vec<MatchTuple>> = HashMap::new();
+
+            for m in mini_searcher.trace_all_hits(&mini_encoded, &text, k as u32) {
+                mini_map.entry(m.query_idx).or_default().push((
+                    m.start,
+                    m.end + 1, // to match sassy's non inclusive end position
+                    m.edits as isize,
+                    m.operations.to_string(),
+                ));
+            }
+            mini_map.values_mut().for_each(|pairs| {
+                pairs.sort_unstable_by_key(|(s, e, c, cig)| (*s, *e, *c, cig.clone()));
+            });
+
+            //  Sassy
+            let mut sassy_map: HashMap<usize, Vec<MatchTuple>> = HashMap::new();
+
+            for (idx, query) in queries.iter().enumerate() {
+                let mut fwd_pairs =
+                    search_sassy_query(&mut sassy_searcher, query, &text, k as usize);
+                normalize_pairs(&mut fwd_pairs);
+
+                let mut all_pairs = fwd_pairs;
+
+                if include_rc {
+                    let query_rc = crate::iupac::reverse_complement(query);
+                    let mut rc_pairs =
+                        search_sassy_query(&mut sassy_searcher, &query_rc, &text, k as usize);
+                    normalize_pairs(&mut rc_pairs);
+                    all_pairs.extend(rc_pairs);
+                }
+
+                all_pairs.sort_unstable_by_key(|(s, e, c, cig)| (*s, *e, *c, cig.clone()));
+
+                if !all_pairs.is_empty() {
+                    sassy_map.insert(idx, all_pairs);
+                }
+            }
+
+            assert_eq!(sassy_map.len(), mini_map.len());
+
+            let sassy_query_ids: HashSet<_> = sassy_map.keys().copied().collect();
+            let mini_query_ids: HashSet<_> = mini_map.keys().copied().collect();
+            assert_eq!(sassy_query_ids, mini_query_ids);
+
+            let pooled_keys: HashSet<_> = sassy_query_ids.union(&mini_query_ids).copied().collect();
+
+            for i in pooled_keys {
+                assert_eq!(
+                    sassy_map.get(&i).unwrap(),
+                    mini_map.get(&i).unwrap(),
+                    "Mismatch for query {}. Text: {:?}, Query: {:?}",
+                    i,
+                    String::from_utf8_lossy(&text),
+                    String::from_utf8_lossy(&queries[i])
+                );
+            }
+        }
+    }
     #[test]
     fn mini_trace_bug() {
-        use crate::backend::U32;
-        use crate::iupac::reverse_complement;
-        use crate::TQueries;
-        use sassy::profiles::Iupac;
-        use sassy::Searcher as SassySearcher;
-
         let q = b"GTCCGAC";
         let q_rc = crate::iupac::reverse_complement(q);
         //                   0123456789-1
@@ -1194,8 +1276,8 @@ mod tests {
         println!("q_rc: {:?}", String::from_utf8_lossy(&q_rc));
 
         let k = 2;
-        let mut searcher = Searcher::<U32>::new(Some(0.5));
-        let query_transposed = TQueries::<U32>::new(&[q.to_vec()], true);
+        let mut searcher = Searcher::<TestBackend>::new(Some(0.5));
+        let query_transposed = TQueries::<TestBackend>::new(&[q.to_vec()], true);
         let mini_matches = searcher.trace_all_hits(&query_transposed, t, k as u32);
         for m in mini_matches {
             println!(
