@@ -1,7 +1,7 @@
 mod edlib_bench;
 
 use edlib_bench::{get_edlib_config, run_edlib, sim_data::Alphabet};
-use mini_myers::backend::{SimdBackend, U16, U32};
+use mini_myers::backend::{SimdBackend, U16, U32, U64};
 use mini_myers::search::Searcher as MiniSearcher;
 use mini_myers::TQueries;
 use rand::rngs::StdRng;
@@ -49,7 +49,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut results = Vec::new();
 
     let target_lens = vec![16, 32, 100, 1000, 10_000, 100_000];
-    let query_lens = vec![16, 32];
+    let query_lens = vec![16, 32, 64];
     let ks = vec![1, 4];
     let iterations = 100;
     let n_queries = 96;
@@ -116,10 +116,12 @@ fn run_bench_round(
         sassy_matches += sassy_searcher.search_all(q, &target, k as usize).len();
     }
 
-    let (mini_search_matches, mini_search_time) = if query_len == 16 {
+    let (mini_search_matches, mini_search_time) = if query_len <= 16 {
         run_mini_bench::<U16>(&queries, &target, k, iterations)
-    } else {
+    } else if query_len <= 32 {
         run_mini_bench::<U32>(&queries, &target, k, iterations)
+    } else {
+        run_mini_bench::<U64>(&queries, &target, k, iterations)
     };
 
     // Edlib Count - count matches by checking edit distance
