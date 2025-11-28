@@ -88,7 +88,7 @@ let alignments = searcher.trace_all_hits(&t_queries, text, k);
 
 #### Little bench
 Comparing mini search (orange) against [sassy](https://github.com/RagnarGrootKoerkamp/sassy.git)(green) `search_all`, 
-and [edlib](https://github.com/Martinsos/edlib)(purple) for 96 queries of length [16, 32] at k=[1,4] in a range of targets (x-axis)
+and [edlib](https://github.com/Martinsos/edlib)(purple) for 96 queries of length [16, 32, 64] at k=[1,4] in a range of targets (x-axis)
 
 <img src="test_data/bench.png" alt="mini_scan vs sassy benchmark plot" width="800"/>
 
