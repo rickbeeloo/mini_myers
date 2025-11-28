@@ -1,7 +1,21 @@
+use crate::backend::SimdBackend;
 use crate::iupac::get_encoded;
 use crate::tqueries::TQueries;
-use crate::{backend::SimdBackend, tqueries};
 use pa_types::{Cigar, CigarOp, Cost};
+
+#[cfg(target_arch = "x86_64")]
+use std::arch::x86_64::_mm_prefetch;
+
+/// Prefetch hint for temporal data (keep in cache)
+#[cfg(target_arch = "x86_64")]
+#[inline(always)]
+unsafe fn prefetch_read<T>(ptr: *const T) {
+    _mm_prefetch(ptr as *const i8, std::arch::x86_64::_MM_HINT_T0);
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+#[inline(always)]
+unsafe fn prefetch_read<T>(_ptr: *const T) {}
 
 #[derive(Clone, Copy, Default)]
 struct BlockState<S: Copy> {
@@ -134,11 +148,10 @@ impl<B: SimdBackend> Searcher<B> {
         vn: B::Simd,
         cost: B::Simd,
         eq: B::Simd,
+        all_ones: B::Simd,
         last_bit_shift: u32,
         last_bit_mask: B::Simd,
     ) -> (B::Simd, B::Simd, B::Simd) {
-        let all_ones = B::splat_all_ones();
-
         let eq_and_pv = eq & vp;
         let xh = ((eq_and_pv + vp) ^ vp) | eq;
         let mh = vp & xh;
@@ -174,52 +187,62 @@ impl<B: SimdBackend> Searcher<B> {
         self.reset_state(t_queries, alpha_pattern);
         self.search_hits.clear();
 
-        for pos_vec in self.positions.iter_mut().take(t_queries.n_queries) {
-            pos_vec.clear();
-        }
-
         let k_simd = B::splat_scalar(B::scalar_from_i64(k as i64));
         let last_bit_shift = (t_queries.query_length - 1) as u32;
         let last_bit_mask = B::splat_one() << last_bit_shift;
+        let all_ones = B::splat_all_ones();
 
         let peqs_ptr: *const <B as SimdBackend>::Simd = t_queries.peqs.as_ptr();
         let blocks_ptr = self.blocks.as_mut_ptr();
-        let zero_scalar = B::scalar_from_i64(0);
+        let n_queries = t_queries.n_queries;
 
-        for (idx, &c) in text.iter().enumerate() {
+        let text_ptr = text.as_ptr();
+        let text_len = text.len();
+
+        for idx in 0..text_len {
+            let c = unsafe { *text_ptr.add(idx) };
             let encoded = get_encoded(c) as usize;
-            let peq_block_start_index = encoded * num_blocks;
+            let peq_base = unsafe { peqs_ptr.add(encoded * num_blocks) };
+
+            // Prefetch next character's peq
+            if idx + 1 < text_len {
+                let next_c = unsafe { *text_ptr.add(idx + 1) };
+                let next_encoded = get_encoded(next_c) as usize;
+                unsafe { prefetch_read(peqs_ptr.add(next_encoded * num_blocks)) };
+            }
 
             for block_i in 0..num_blocks {
                 unsafe {
-                    let eq = *peqs_ptr.add(peq_block_start_index + block_i);
+                    let eq = *peq_base.add(block_i);
                     let block = &mut *blocks_ptr.add(block_i);
                     let (vp_out, vn_out, cost_out) = Self::myers_step(
                         block.vp,
                         block.vn,
                         block.cost,
                         eq,
+                        all_ones,
                         last_bit_shift,
                         last_bit_mask,
                     );
                     block.vp = vp_out;
                     block.vn = vn_out;
                     block.cost = cost_out;
-                    let gt_mask = B::simd_gt(cost_out, k_simd);
-                    if gt_mask != B::splat_all_ones() {
-                        let mask_arr = B::to_array(gt_mask);
-                        let mask_slice = mask_arr.as_ref();
 
-                        for (lane_idx, &val) in mask_slice.iter().enumerate() {
-                            if val == zero_scalar {
-                                let query_idx = block_i * B::LANES + lane_idx;
-                                if query_idx < t_queries.n_queries {
-                                    self.search_hits.push(SearchHit {
-                                        query_idx,
-                                        end_position: idx,
-                                    });
-                                }
+                    let gt_mask = B::simd_gt(cost_out, k_simd);
+                    if gt_mask != all_ones {
+                        let hit_bits = B::lanes_with_zero(gt_mask);
+                        let base_query_idx = block_i * B::LANES;
+                        let mut bits = hit_bits;
+                        while bits != 0 {
+                            let lane_idx = bits.trailing_zeros() as usize;
+                            let query_idx = base_query_idx + lane_idx;
+                            if query_idx < n_queries {
+                                self.search_hits.push(SearchHit {
+                                    query_idx,
+                                    end_position: idx,
+                                });
                             }
+                            bits &= bits - 1;
                         }
                     }
                 }
@@ -228,7 +251,7 @@ impl<B: SimdBackend> Searcher<B> {
 
         // Handle suffix overhang
         if self.alpha_pattern != !0 {
-            let eq = B::splat_all_ones();
+            let eq = all_ones;
             let steps_needed = t_queries.query_length;
             let blocks_ptr = self.blocks.as_mut_ptr();
             let mut current_text_pos = text.len();
@@ -242,6 +265,7 @@ impl<B: SimdBackend> Searcher<B> {
                             block.vn,
                             block.cost,
                             eq,
+                            all_ones,
                             last_bit_shift,
                             last_bit_mask,
                         );
@@ -305,8 +329,10 @@ impl<B: SimdBackend> Searcher<B> {
         let num_blocks = 1; // Just one block now which we check in assert
         self.ensure_capacity(num_blocks, batch_size);
 
+        let expected_steps = t_queries.query_length + k as usize + 2;
         for i in 0..batch_size {
             self.history[i].steps.clear();
+            self.history[i].steps.reserve(expected_steps);
         }
 
         let length_mask = (!0u64) >> (64usize.saturating_sub(t_queries.query_length));
@@ -364,6 +390,7 @@ impl<B: SimdBackend> Searcher<B> {
                     block.vn,
                     block.cost,
                     eq,
+                    all_ones,
                     last_bit_shift,
                     last_bit_mask,
                 );
@@ -397,16 +424,17 @@ impl<B: SimdBackend> Searcher<B> {
         // NOTE: in search we do correct the cost here based on overhang cost, but we don't mutate vn,vp.
         // so in the trace these would show as regular matches we handled that later in `traceback_single`
         if self.alpha_pattern != !0 {
-            let eq = B::splat_all_ones();
+            let eq = all_ones;
             let blocks_ptr = self.blocks.as_mut_ptr();
-            for i in 0..t_queries.query_length {
+            for _i in 0..t_queries.query_length {
                 unsafe {
                     let block = &mut *blocks_ptr;
-                    let (vp_out, vn_out, cost_out) = Self::myers_step(
+                    let (vp_out, vn_out, _cost_out) = Self::myers_step(
                         block.vp,
                         block.vn,
                         block.cost,
                         eq,
+                        all_ones,
                         last_bit_shift,
                         last_bit_mask,
                     );
@@ -630,7 +658,7 @@ mod tests {
     use std::collections::{HashMap, HashSet};
 
     #[cfg(test)]
-    type TestBackend = crate::backend::U16; // change for tests on u16, u32, and u64 backends
+    type TestBackend = crate::backend::U64; // change for tests on u16, u32, and u64 backends
 
     #[test]
     fn test_search_with_hits_simple() {

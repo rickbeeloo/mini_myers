@@ -48,10 +48,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut rng = StdRng::seed_from_u64(42);
     let mut results = Vec::new();
 
-    let target_lens = vec![16, 32, 100, 1000, 1500, 2000, 10_000, 100_000];
+    let target_lens = vec![16, 32, 100, 1000, 10_000, 100_000];
     let query_lens = vec![16, 32];
     let ks = vec![1, 4];
-    let iterations = 1000;
+    let iterations = 100;
     let n_queries = 96;
 
     for target_len in &target_lens {
@@ -222,7 +222,7 @@ fn run_mini_bench<B: SimdBackend>(
     let mini_search_res = searcher.trace_all_hits(&t_queries, target, k as u32);
     let mini_search_matches: usize = mini_search_res.len();
 
-\    let mini_search_time = time_iterations(iterations, || {
+    let mini_search_time = time_iterations(iterations, || {
         let m = searcher.trace_all_hits(&t_queries, target, k as u32);
         black_box(m);
     });

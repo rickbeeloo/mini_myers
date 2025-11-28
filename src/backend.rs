@@ -3,6 +3,9 @@ use std::ops::{Add, BitAnd, BitAndAssign, BitOr, BitOrAssign, BitXor, Shl, Shr, 
 
 use wide::{u16x16, u32x8, u64x4, u8x32, CmpEq};
 
+#[cfg(target_arch = "x86_64")]
+use std::arch::x86_64::*;
+
 // So much boilerplate still, cant we generalize over the wide type or something
 
 pub trait SimdBackend: Copy + 'static + Send + Sync + Default + std::fmt::Debug {
@@ -52,6 +55,9 @@ pub trait SimdBackend: Copy + 'static + Send + Sync + Default + std::fmt::Debug 
     fn splat_zero() -> Self::Simd;
     fn splat_one() -> Self::Simd;
     fn splat_scalar(value: Self::Scalar) -> Self::Simd;
+
+    // Check if any lane is zero (hit detected)
+    fn lanes_with_zero(vec: Self::Simd) -> u32;
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -127,6 +133,30 @@ impl SimdBackend for I32x8Backend {
             let b: i32x8 = transmute(rhs);
             let mask = i32x8::splat((1u32 << 31) as i32);
             transmute(CmpGt::simd_gt(a ^ mask, b ^ mask))
+        }
+    }
+
+    #[inline(always)]
+    fn lanes_with_zero(vec: Self::Simd) -> u32 {
+        #[cfg(target_arch = "x86_64")]
+        unsafe {
+            use std::mem::transmute;
+            let v: __m256i = transmute(vec);
+            let zero = _mm256_setzero_si256();
+            let eq = _mm256_cmpeq_epi32(v, zero);
+            // movemask_ps returns bit i set if float i's sign bit is set
+            _mm256_movemask_ps(transmute(eq)) as u32
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            let arr = Self::to_array(vec);
+            let mut result = 0u32;
+            for (i, &v) in arr.as_ref().iter().enumerate() {
+                if v == 0 {
+                    result |= 1 << i;
+                }
+            }
+            result
         }
     }
 }
@@ -206,6 +236,30 @@ impl SimdBackend for I64x4Backend {
             transmute(CmpGt::simd_gt(a ^ mask, b ^ mask))
         }
     }
+
+    #[inline(always)]
+    fn lanes_with_zero(vec: Self::Simd) -> u32 {
+        #[cfg(target_arch = "x86_64")]
+        unsafe {
+            use std::mem::transmute;
+            let v: __m256i = transmute(vec);
+            let zero = _mm256_setzero_si256();
+            let eq = _mm256_cmpeq_epi64(v, zero);
+            // For 64-bit lanes, use movemask_pd (treats as 4 doubles)
+            _mm256_movemask_pd(transmute(eq)) as u32
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            let arr = Self::to_array(vec);
+            let mut result = 0u32;
+            for (i, &v) in arr.as_ref().iter().enumerate() {
+                if v == 0 {
+                    result |= 1 << i;
+                }
+            }
+            result
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -279,6 +333,46 @@ impl SimdBackend for I16x16Backend {
             let b: i16x16 = transmute(rhs);
             let mask = i16x16::splat((1u32 << 15) as i16); // 1u32 << 15 is 32768
             transmute(CmpGt::simd_gt(a ^ mask, b ^ mask))
+        }
+    }
+
+    #[inline(always)]
+    fn lanes_with_zero(vec: Self::Simd) -> u32 {
+        #[cfg(target_arch = "x86_64")]
+        unsafe {
+            use std::mem::transmute;
+            let v: __m256i = transmute(vec);
+            let zero = _mm256_setzero_si256();
+            let eq = _mm256_cmpeq_epi16(v, zero);
+            let mask = _mm256_movemask_epi8(eq) as u32;
+            // Pack: bits 0,2,4,...,30 -> bits 0,1,2,...,15
+            // Use pext if available, otherwise bit manipulation
+            #[cfg(target_feature = "bmi2")]
+            {
+                std::arch::x86_64::_pext_u32(mask, 0x55555555)
+            }
+            #[cfg(not(target_feature = "bmi2"))]
+            {
+                // Manual bit extraction: every other bit
+                let mut result = 0u32;
+                for i in 0..16 {
+                    if (mask & (1 << (i * 2))) != 0 {
+                        result |= 1 << i;
+                    }
+                }
+                result
+            }
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            let arr = Self::to_array(vec);
+            let mut result = 0u32;
+            for (i, &v) in arr.as_ref().iter().enumerate() {
+                if v == 0 {
+                    result |= 1 << i;
+                }
+            }
+            result
         }
     }
 }
