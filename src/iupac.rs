@@ -39,7 +39,7 @@ const IUPAC_CODE: [u8; 32] = {
 };
 
 #[inline(always)]
-pub(crate) fn reverse_complement(seq: &[u8]) -> Vec<u8> {
+pub fn reverse_complement(seq: &[u8]) -> Vec<u8> {
     seq.iter().rev().map(|&c| RC[c as usize]).collect()
 }
 

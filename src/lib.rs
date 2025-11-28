@@ -4,7 +4,7 @@ pub mod constant {
 }
 
 pub mod backend;
-mod iupac;
+pub mod iupac;
 pub mod search;
 pub mod tqueries;
 

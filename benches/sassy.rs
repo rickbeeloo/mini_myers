@@ -2,6 +2,7 @@ mod edlib_bench;
 
 use edlib_bench::{get_edlib_config, run_edlib, sim_data::Alphabet};
 use mini_myers::backend::{SimdBackend, U16, U32, U64};
+use mini_myers::search::hierarchical_search;
 use mini_myers::search::Searcher as MiniSearcher;
 use mini_myers::TQueries;
 use rand::rngs::StdRng;
@@ -57,28 +58,21 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     for target_len in &target_lens {
         for query_len in &query_lens {
             for k in &ks {
-                let (mini_search, sassy, edlib) =
+                let results_batch =
                     run_bench_round(&mut rng, *target_len, *query_len, iterations, *k, n_queries);
 
-                println!(
-                    "T={:<7} Q={:<2} K={} | \
-                    Search: {:>7.3}ms ({:>7.3}µs/q) | \
-                    Sassy:  {:>7.3}ms ({:>7.3}µs/q) | \
-                    Edlib:  {:>7.3}ms ({:>7.3}µs/q)",
-                    target_len,
-                    query_len,
-                    k,
-                    mini_search.avg_batch_ms(),
-                    mini_search.avg_per_query_us(),
-                    sassy.avg_batch_ms(),
-                    sassy.avg_per_query_us(),
-                    edlib.avg_batch_ms(),
-                    edlib.avg_per_query_us(),
-                );
-
-                results.push(mini_search);
-                results.push(sassy);
-                results.push(edlib);
+                for res in &results_batch {
+                    println!(
+                        "T={:<7} Q={:<2} K={} | {:<12}: {:>7.3}ms ({:>7.3}µs/q)",
+                        target_len,
+                        query_len,
+                        k,
+                        res.tool,
+                        res.avg_batch_ms(),
+                        res.avg_per_query_us()
+                    );
+                }
+                results.extend(results_batch);
             }
         }
     }
@@ -99,7 +93,7 @@ fn run_bench_round(
     iterations: usize,
     k: u8,
     n_queries: usize,
-) -> (BenchResult, BenchResult, BenchResult) {
+) -> Vec<BenchResult> {
     let target = generate_random_dna(rng, target_len);
     let mut queries = Vec::new();
     for _ in 0..n_queries {
@@ -123,6 +117,28 @@ fn run_bench_round(
     } else {
         run_mini_bench::<U64>(&queries, &target, k, iterations)
     };
+
+    let mut results = Vec::new();
+
+    if query_len > 16 {
+        let (hier_matches, hier_time) = if query_len <= 32 {
+            run_hierarchical_bench::<U16, U32>(&queries, &target, k, iterations)
+        } else {
+            run_hierarchical_bench::<U16, U64>(&queries, &target, k, iterations)
+        };
+
+        results.push(BenchResult {
+            tool: "mini_hier",
+            target_len,
+            query_len,
+            k,
+            iterations,
+            queries_per_iter: queries.len(),
+            num_matches: hier_matches,
+            avg_batch_ns: average_per_batch(hier_time, iterations),
+            avg_per_query_ns: average_per_query(hier_time, iterations, queries.len()),
+        });
+    }
 
     // Edlib Count - count matches by checking edit distance
     let mut edlib_matches = 0;
@@ -161,7 +177,7 @@ fn run_bench_round(
 
     let queries_per_iter = queries.len();
 
-    let res_search = BenchResult {
+    results.push(BenchResult {
         tool: "mini_search",
         target_len,
         query_len,
@@ -171,21 +187,9 @@ fn run_bench_round(
         num_matches: mini_search_matches,
         avg_batch_ns: average_per_batch(mini_search_time, iterations),
         avg_per_query_ns: average_per_query(mini_search_time, iterations, queries_per_iter),
-    };
+    });
 
-    // let res_scan = BenchResult {
-    //     tool: "mini_scan",
-    //     target_len,
-    //     query_len,
-    //     k,
-    //     iterations,
-    //     queries_per_iter,
-    //     num_matches: mini_scan_matches,
-    //     avg_batch_ns: average_per_batch(mini_scan_time, iterations),
-    //     avg_per_query_ns: average_per_query(mini_scan_time, iterations, queries_per_iter),
-    // };
-
-    let res_sassy = BenchResult {
+    results.push(BenchResult {
         tool: "sassy",
         target_len,
         query_len,
@@ -195,9 +199,9 @@ fn run_bench_round(
         num_matches: sassy_matches,
         avg_batch_ns: average_per_batch(sassy_time, iterations),
         avg_per_query_ns: average_per_query(sassy_time, iterations, queries_per_iter),
-    };
+    });
 
-    let res_edlib = BenchResult {
+    results.push(BenchResult {
         tool: "edlib",
         target_len,
         query_len,
@@ -207,9 +211,52 @@ fn run_bench_round(
         num_matches: edlib_matches,
         avg_batch_ns: average_per_batch(edlib_time, iterations),
         avg_per_query_ns: average_per_query(edlib_time, iterations, queries_per_iter),
-    };
+    });
 
-    (res_search, res_sassy, res_edlib)
+    results
+}
+
+fn run_hierarchical_bench<P: SimdBackend, F: SimdBackend>(
+    queries: &[Vec<u8>],
+    target: &[u8],
+    k: u8,
+    iterations: usize,
+) -> (usize, Duration) {
+    let suffix_len = 16;
+    let suffix_queries: Vec<Vec<u8>> = queries
+        .iter()
+        .map(|q| q[q.len().saturating_sub(suffix_len)..].to_vec())
+        .collect();
+
+    let suffix_tqueries = TQueries::<P>::new(&suffix_queries, true);
+    let mut suffix_searcher = MiniSearcher::<P>::new(None);
+
+    let full_tqueries = TQueries::<F>::new(queries, true);
+    let mut full_searcher = MiniSearcher::<F>::new(None);
+
+    let matches = hierarchical_search(
+        &mut suffix_searcher,
+        &suffix_tqueries,
+        &mut full_searcher,
+        &full_tqueries,
+        target,
+        k as u32,
+    );
+    let num_matches = matches.len();
+
+    let time = time_iterations(iterations, || {
+        let m = hierarchical_search(
+            &mut suffix_searcher,
+            &suffix_tqueries,
+            &mut full_searcher,
+            &full_tqueries,
+            target,
+            k as u32,
+        );
+        black_box(m);
+    });
+
+    (num_matches, time)
 }
 
 fn run_mini_bench<B: SimdBackend>(

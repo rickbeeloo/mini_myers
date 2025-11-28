@@ -647,6 +647,45 @@ impl<B: SimdBackend> Searcher<B> {
     }
 }
 
+pub fn hierarchical_search<P, F>(
+    suffix_searcher: &mut Searcher<P>,
+    suffix_tqueries: &TQueries<P>,
+    full_searcher: &mut Searcher<F>,
+    full_tqueries: &TQueries<F>,
+    text: &[u8],
+    k: u32,
+) -> Vec<Alignment>
+where
+    P: SimdBackend,
+    F: SimdBackend,
+{
+    // First we search for the suffixes alone <=k, then we batch trace them using full searcher
+    let suffix_hits = suffix_searcher.search_with_hits(suffix_tqueries, text, k);
+    // println!(
+    //     "T length: {}, Suffix hits: {}",
+    //     text.len(),
+    //     suffix_hits.len()
+    // );
+
+    let mut all_alignments = Vec::with_capacity(suffix_hits.len());
+
+    full_searcher.ensure_capacity(full_tqueries.n_simd_blocks, full_tqueries.n_queries);
+    full_searcher.reset_state(full_tqueries, full_searcher.alpha_pattern);
+    full_searcher.search_hits.clear();
+
+    for chunk_start in (0..suffix_hits.len()).step_by(F::LANES) {
+        let chunk_end = (chunk_start + F::LANES).min(suffix_hits.len());
+        let batch: Vec<SearchHit> = suffix_hits[chunk_start..chunk_end].to_vec();
+        let batch_alignments = full_searcher.trace_batch(full_tqueries, text, &batch, k);
+        for aln in batch_alignments.iter() {
+            if aln.edits <= k {
+                all_alignments.push(aln.clone());
+            }
+        }
+    }
+    all_alignments
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1161,22 +1200,42 @@ mod tests {
 
     #[test]
     fn fuzz_without_overhang() {
-        fuzz_against_sassy_batch(None, false);
+        fuzz_against_sassy_batch(None, false, false);
     }
 
     #[test]
     fn fuzz_with_overhang() {
-        fuzz_against_sassy_batch(Some(0.5), false);
+        fuzz_against_sassy_batch(Some(0.5), false, false);
     }
 
     #[test]
     fn fuzz_without_overhang_inc_rc() {
-        fuzz_against_sassy_batch(None, true);
+        fuzz_against_sassy_batch(None, true, false);
     }
 
     #[test]
     fn fuzz_with_overhang_inc_rc() {
-        fuzz_against_sassy_batch(Some(0.5), true);
+        fuzz_against_sassy_batch(Some(0.5), true, false);
+    }
+
+    #[test]
+    fn fuzz_without_overhang_hier() {
+        fuzz_against_sassy_batch(None, false, true);
+    }
+
+    #[test]
+    fn fuzz_with_overhang_hier() {
+        fuzz_against_sassy_batch(Some(0.5), false, true);
+    }
+
+    #[test]
+    fn fuzz_without_overhang_inc_rc_hier() {
+        fuzz_against_sassy_batch(None, true, true);
+    }
+
+    #[test]
+    fn fuzz_with_overhang_inc_rc_hier() {
+        fuzz_against_sassy_batch(Some(0.5), true, true);
     }
 
     type MatchTuple = (usize, usize, isize, String);
@@ -1206,13 +1265,16 @@ mod tests {
             .collect()
     }
 
-    fn fuzz_against_sassy_batch(alpha: Option<f32>, include_rc: bool) {
+    fn fuzz_against_sassy_batch(alpha: Option<f32>, include_rc: bool, use_hierarchical: bool) {
         let mut sassy_searcher = if let Some(a) = alpha {
             SassySearcher::<Iupac>::new_fwd_with_overhang(a)
         } else {
             SassySearcher::<Iupac>::new_fwd()
         };
         let mut mini_searcher = Searcher::<TestBackend>::new(alpha);
+        // Need separate searchers for hierarchical
+        let mut suffix_searcher = Searcher::<crate::backend::U16>::new(alpha);
+        let mut full_searcher = Searcher::<TestBackend>::new(alpha);
 
         let mut rng = thread_rng();
 
@@ -1235,9 +1297,35 @@ mod tests {
 
             // Mini
             let mini_encoded = TQueries::<TestBackend>::new(&queries, include_rc);
-            let mut mini_map: HashMap<usize, Vec<MatchTuple>> = HashMap::new();
 
-            for m in mini_searcher.trace_all_hits(&mini_encoded, &text, k as u32) {
+            let matches = if use_hierarchical {
+                // Only use hierarchical if query length is sufficient
+                if q_len > 16 {
+                    let suffix_len = 16;
+                    let suffix_queries: Vec<Vec<u8>> = queries
+                        .iter()
+                        .map(|q| q[q.len().saturating_sub(suffix_len)..].to_vec())
+                        .collect();
+                    let suffix_tqueries =
+                        TQueries::<crate::backend::U16>::new(&suffix_queries, include_rc);
+
+                    hierarchical_search(
+                        &mut suffix_searcher,
+                        &suffix_tqueries,
+                        &mut full_searcher,
+                        &mini_encoded,
+                        &text,
+                        k as u32,
+                    )
+                } else {
+                    mini_searcher.trace_all_hits(&mini_encoded, &text, k as u32)
+                }
+            } else {
+                mini_searcher.trace_all_hits(&mini_encoded, &text, k as u32)
+            };
+
+            let mut mini_map: HashMap<usize, Vec<MatchTuple>> = HashMap::new();
+            for m in matches {
                 mini_map.entry(m.query_idx).or_default().push((
                     m.start,
                     m.end + 1, // to match sassy's non inclusive end position
